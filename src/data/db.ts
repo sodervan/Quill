@@ -257,6 +257,12 @@ async function incrementDailyLog(): Promise<void> {
      ON CONFLICT(date) DO UPDATE SET qualifying_reads = qualifying_reads + 1`,
     [key],
   );
+  const row = await db.getFirstAsync<{ qualifying_reads: number }>(
+    `SELECT qualifying_reads FROM daily_log WHERE date = ?`, [key],
+  );
+  if (row) {
+    import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads)).catch(() => {});
+  }
 }
 
 // --- Saved articles ---

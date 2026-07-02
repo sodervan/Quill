@@ -39,10 +39,10 @@ export default function OnboardingScreen({ onDone }: Props) {
     });
   }
 
-  async function finish() {
+  async function finish(followAll = false) {
     setLoading(true);
     try {
-      const toFollow = selectedPubs.size > 0 ? selectedPubs : new Set(displayPubs.map((p) => p.id));
+      const toFollow = followAll ? displayPubs.map((p) => p.id) : [...selectedPubs];
       for (const id of toFollow) await followPublication(id);
       await setSetting('onboarding_done', '1');
       onDone();
@@ -146,7 +146,7 @@ export default function OnboardingScreen({ onDone }: Props) {
           <View style={s.footer}>
             <TouchableOpacity
               style={s.primaryBtn}
-              onPress={finish}
+              onPress={() => void finish(false)}
               disabled={loading}
               activeOpacity={0.85}
             >
@@ -155,8 +155,8 @@ export default function OnboardingScreen({ onDone }: Props) {
                 {!loading && <Ionicons name="checkmark-done" size={18} color={colors.bgDeep} style={{ marginLeft: 6 }} />}
               </LinearGradient>
             </TouchableOpacity>
-            <TouchableOpacity onPress={finish} style={s.skipBtn}>
-              <Text style={s.skipText}>Follow all & skip</Text>
+            <TouchableOpacity onPress={() => void finish(true)} style={s.skipBtn}>
+              <Text style={s.skipText}>Follow all & start reading</Text>
             </TouchableOpacity>
           </View>
         </>

@@ -83,6 +83,16 @@ export async function syncUnsave(articleId: string): Promise<void> {
   } catch {}
 }
 
+export async function syncDailyLog(date: string, qualifyingReads: number): Promise<void> {
+  const userId = await uid();
+  if (!userId) return;
+  try {
+    await supabase.from('user_daily_log').upsert({
+      user_id: userId, date, qualifying_reads: qualifyingReads,
+    });
+  } catch {}
+}
+
 export async function syncHighlight(h: HighlightRow): Promise<void> {
   const userId = await uid();
   if (!userId) return;
@@ -204,7 +214,20 @@ export async function uploadLocalToSupabase(): Promise<void> {
     }
   } catch {}
 
-  // 4. Highlights
+  // 4. Daily log (streaks)
+  try {
+    const rawDb = db.getDb();
+    const logs = await rawDb.getAllAsync<{ date: string; qualifying_reads: number }>(
+      `SELECT date, qualifying_reads FROM daily_log`,
+    );
+    if (logs.length > 0) {
+      await supabase.from('user_daily_log').upsert(
+        logs.map((l) => ({ user_id: userId, date: l.date, qualifying_reads: l.qualifying_reads })),
+      );
+    }
+  } catch {}
+
+  // 5. Highlights
   try {
     const highlights = await db.getAllHighlights();
     if (highlights.length > 0) {
@@ -312,7 +335,26 @@ export async function restoreFromSupabase(): Promise<void> {
     }
   } catch {}
 
-  // 4. Restore highlights
+  // 4. Restore daily log (streaks)
+  try {
+    const { data: logs } = await supabase
+      .from('user_daily_log')
+      .select('date, qualifying_reads')
+      .eq('user_id', userId);
+
+    if (logs?.length) {
+      const rawDb = db.getDb();
+      for (const l of logs) {
+        await rawDb.runAsync(
+          `INSERT INTO daily_log (date, qualifying_reads) VALUES (?, ?)
+           ON CONFLICT(date) DO UPDATE SET qualifying_reads = MAX(qualifying_reads, excluded.qualifying_reads)`,
+          [l.date, l.qualifying_reads],
+        );
+      }
+    }
+  } catch {}
+
+  // 5. Restore highlights
   try {
     const { data: highlights } = await supabase
       .from('user_highlights')

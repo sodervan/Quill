@@ -431,6 +431,9 @@ export default function FeedScreen() {
   // Hidden articles
   const [hidden, setHidden] = useState<Set<string>>(new Set());
 
+  // Shuffle
+  const [shuffled, setShuffled] = useState(false);
+
   // Action sheet — animations live here so they survive open/close cycles
   const sheetAnimY = useRef(new Animated.Value(500)).current;
   const sheetAnimBg = useRef(new Animated.Value(0)).current;
@@ -441,10 +444,21 @@ export default function FeedScreen() {
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
-  const applyFilter = useCallback((articles: ArticleRow[], filter: string | null) => {
+  const applyFilter = useCallback((articles: ArticleRow[], filter: string | null, isShuffle = false) => {
     const base = filter ? articles.filter((a) => a.publication_id === filter) : articles;
-    setDisplayed(interleave(base).filter((a) => !hidden.has(a.id)));
+    const ordered = isShuffle
+      ? [...base].sort(() => Math.random() - 0.5)
+      : interleave(base);
+    setDisplayed(ordered.filter((a) => !hidden.has(a.id)));
   }, [hidden]);
+
+  function toggleShuffle() {
+    const next = !shuffled;
+    setShuffled(next);
+    setActiveFilter(null);
+    applyFilter(allArticles, null, next);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }
 
   const loadArticles = useCallback(async (fromNetwork = false) => {
     const ids = await getFollowedIds();
@@ -518,8 +532,9 @@ export default function FeedScreen() {
   const onRefresh = useCallback(() => { setRefreshing(true); void loadArticles(true); }, [loadArticles]);
 
   function selectFilter(id: string | null) {
+    setShuffled(false);
     setActiveFilter(id);
-    applyFilter(allArticles, id);
+    applyFilter(allArticles, id, false);
   }
 
   function switchTab(tab: 'following' | 'explore') {
@@ -721,8 +736,19 @@ export default function FeedScreen() {
             <Text style={s.headerDate}>{format(new Date(), 'EEEE, MMMM d').toUpperCase()}</Text>
             <Text style={s.headerTitle}>{feedTab === 'following' ? 'Your Feed' : 'For You'}</Text>
           </View>
-          <View style={s.countBadge}>
-            <Text style={s.countText}>{activeData.length}</Text>
+          <View style={s.headerRight}>
+            {feedTab === 'following' && (
+              <TouchableOpacity
+                onPress={toggleShuffle}
+                style={[s.shuffleBtn, shuffled && s.shuffleBtnActive]}
+                hitSlop={8}
+              >
+                <Ionicons name="shuffle" size={18} color={shuffled ? colors.accent : colors.textMuted} />
+              </TouchableOpacity>
+            )}
+            <View style={s.countBadge}>
+              <Text style={s.countText}>{activeData.length}</Text>
+            </View>
           </View>
         </View>
 
@@ -837,6 +863,13 @@ const s = StyleSheet.create({
   },
   headerDate: { ...T.label, color: colors.accent, marginBottom: 2 },
   headerTitle: { ...T.d2, color: colors.text },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  shuffleBtn: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  shuffleBtnActive: { backgroundColor: colors.accentMuted, borderColor: colors.accentBorder },
   countBadge: {
     backgroundColor: colors.accentMuted, borderRadius: radius.full,
     paddingHorizontal: 12, paddingVertical: 5, borderWidth: 1, borderColor: colors.accentBorder,

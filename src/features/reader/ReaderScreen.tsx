@@ -149,23 +149,23 @@ export default function ReaderScreen({ route, navigation }: Props) {
   }
 
   function onWebMessage(e: { nativeEvent: { data: string } }) {
+    const raw = e.nativeEvent.data;
     try {
-      const raw = e.nativeEvent.data;
-      // Try JSON (selection / highlight events)
-      try {
-        const msg = JSON.parse(raw);
+      const msg = JSON.parse(raw);
+      // Only treat as a typed event if it's an object with a string type field
+      if (msg && typeof msg === 'object' && typeof msg.type === 'string') {
         if (msg.type === 'text_selected') setSelectedText(msg.text ?? '');
         else if (msg.type === 'text_deselected') setSelectedText('');
         else if (msg.type === 'highlight_tap') handleDeleteHighlight(msg.id as number);
         return;
-      } catch {}
-      // Plain float = scroll depth
-      const depth = parseFloat(raw);
-      if (!isNaN(depth)) {
-        scrollDepthRef.current = depth;
-        setScrollProgress(depth);
       }
     } catch {}
+    // Plain float string = scroll depth
+    const depth = parseFloat(raw);
+    if (!isNaN(depth)) {
+      scrollDepthRef.current = depth;
+      setScrollProgress(depth);
+    }
   }
 
   const readMins = wordCount ? Math.max(1, Math.round(wordCount / 200)) : null;
@@ -401,7 +401,14 @@ const READER_JS = `
   }
   window.addEventListener('scroll', reportScroll, { passive: true });
 
-  // Text selection tracking
+  // Text selection: capture range into a pending span so it survives the RN button tap
+  var PENDING = '__ql_pending';
+  function removePending() {
+    var el = document.getElementById(PENDING);
+    if (!el) return;
+    var p = el.parentNode;
+    if (p) { while (el.firstChild) p.insertBefore(el.firstChild, el); p.removeChild(el); }
+  }
   var selTimeout;
   document.addEventListener('selectionchange', function() {
     clearTimeout(selTimeout);
@@ -409,8 +416,18 @@ const READER_JS = `
       var sel = window.getSelection();
       var text = sel ? sel.toString().trim() : '';
       if (text.length > 2) {
+        removePending();
+        try {
+          var range = sel.getRangeAt(0);
+          var span = document.createElement('span');
+          span.id = PENDING;
+          try { range.surroundContents(span); }
+          catch(e) { var frag = range.extractContents(); span.appendChild(frag); range.insertNode(span); }
+          sel.removeAllRanges();
+        } catch(e) {}
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_selected', text: text }));
       } else {
+        removePending();
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_deselected' }));
       }
     }, 300);
@@ -432,11 +449,27 @@ const READER_JS = `
 true;
 `;
 
-// Injects a highlight mark into the live WebView DOM by walking text nodes.
-// Avoids a WebView source-prop change (which causes full reload + scroll-to-top).
 function buildInjectMarkJS(text: string, id: number, color: string): string {
+  const css = `background:${color}55;border-radius:3px;padding:0 2px;cursor:pointer`;
   return `(function(){
-  var text=${JSON.stringify(text)},id=${id},color=${JSON.stringify(color)};
+  var id=${id},css=${JSON.stringify(css)};
+  function makeMark(){
+    var m=document.createElement('mark');
+    m.setAttribute('data-highlight-id',String(id));
+    m.style.cssText=css;
+    return m;
+  }
+  // Primary: convert the pending span captured at selection time
+  var span=document.getElementById('__ql_pending');
+  if(span){
+    var mark=makeMark();
+    while(span.firstChild)mark.appendChild(span.firstChild);
+    span.parentNode.replaceChild(mark,span);
+    window.getSelection().removeAllRanges();
+    return;
+  }
+  // Fallback: walk text nodes (works for simple single-node selections)
+  var text=${JSON.stringify(text)};
   var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
   var node;
   while(node=walker.nextNode()){
@@ -445,13 +478,11 @@ function buildInjectMarkJS(text: string, id: number, color: string): string {
     if(i<0)continue;
     var before=node.nodeValue.slice(0,i);
     var after=node.nodeValue.slice(i+text.length);
-    var mark=document.createElement('mark');
-    mark.setAttribute('data-highlight-id',String(id));
-    mark.style.cssText='background:'+color+'55;border-radius:3px;padding:0 2px;cursor:pointer';
-    mark.textContent=text;
+    var mark2=makeMark();
+    mark2.textContent=text;
     var p=node.parentNode;
     if(before)p.insertBefore(document.createTextNode(before),node);
-    p.insertBefore(mark,node);
+    p.insertBefore(mark2,node);
     if(after)p.insertBefore(document.createTextNode(after),node);
     p.removeChild(node);
     break;

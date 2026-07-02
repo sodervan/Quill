@@ -45,3 +45,14 @@ create table if not exists user_highlights (
 alter table user_highlights enable row level security;
 create policy "Users own their highlights"
   on user_highlights for all using (auth.uid() = user_id);
+
+-- ── Daily reading log (source of truth for streaks) ──────────────────────────
+create table if not exists user_daily_log (
+  user_id          uuid    references auth.users(id) on delete cascade,
+  date             text    not null,
+  qualifying_reads integer not null default 0,
+  primary key (user_id, date)
+);
+alter table user_daily_log enable row level security;
+create policy "Users own their daily log"
+  on user_daily_log for all using (auth.uid() = user_id);
