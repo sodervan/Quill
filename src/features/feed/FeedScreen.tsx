@@ -431,8 +431,9 @@ export default function FeedScreen() {
   // Hidden articles
   const [hidden, setHidden] = useState<Set<string>>(new Set());
 
-  // Shuffle
+  // Shuffle — ref keeps loadArticles (stable callback) in sync without adding to its deps
   const [shuffled, setShuffled] = useState(false);
+  const shuffledRef = useRef(false);
 
   // Action sheet — animations live here so they survive open/close cycles
   const sheetAnimY = useRef(new Animated.Value(500)).current;
@@ -455,6 +456,7 @@ export default function FeedScreen() {
   function toggleShuffle() {
     const next = !shuffled;
     setShuffled(next);
+    shuffledRef.current = next;
     setActiveFilter(null);
     applyFilter(allArticles, null, next);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -491,7 +493,7 @@ export default function FeedScreen() {
     ]);
     setSavedIds(saved);
     setAllArticles(rows);
-    applyFilter(rows, activeFilter);
+    applyFilter(rows, activeFilter, shuffledRef.current);
     setLoading(false);
     setRefreshing(false);
   }, [activeFilter, applyFilter]);
@@ -533,6 +535,7 @@ export default function FeedScreen() {
 
   function selectFilter(id: string | null) {
     setShuffled(false);
+    shuffledRef.current = false;
     setActiveFilter(id);
     applyFilter(allArticles, id, false);
   }

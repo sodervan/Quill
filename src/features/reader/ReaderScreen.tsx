@@ -336,7 +336,12 @@ export default function ReaderScreen({ route, navigation }: Props) {
                 />
               ))}
               <TouchableOpacity
-                onPress={() => setSelectedText('')}
+                onPress={() => {
+                  setSelectedText('');
+                  webViewRef.current?.injectJavaScript(
+                    `(function(){var el=document.getElementById('__ql_pending');if(!el)return;var p=el.parentNode;if(p){while(el.firstChild)p.insertBefore(el.firstChild,el);p.removeChild(el);}})();true;`
+                  );
+                }}
                 style={s.highlightDismiss}
                 hitSlop={8}
               >
@@ -401,7 +406,9 @@ const READER_JS = `
   }
   window.addEventListener('scroll', reportScroll, { passive: true });
 
-  // Text selection: capture range into a pending span so it survives the RN button tap
+  // Text selection: capture range into a pending span so it survives the RN button tap.
+  // Guard: don't wrap while the user is still touching (mid-drag), and don't react to the
+  // selectionchange that our own removeAllRanges() fires (would un-wrap the pending span).
   var PENDING = '__ql_pending';
   function removePending() {
     var el = document.getElementById(PENDING);
@@ -409,29 +416,51 @@ const READER_JS = `
     var p = el.parentNode;
     if (p) { while (el.firstChild) p.insertBefore(el.firstChild, el); p.removeChild(el); }
   }
+
+  var touching = false;
+  var wrapping = false;
   var selTimeout;
-  document.addEventListener('selectionchange', function() {
+
+  document.addEventListener('touchstart', function() {
+    touching = true;
     clearTimeout(selTimeout);
-    selTimeout = setTimeout(function() {
-      var sel = window.getSelection();
-      var text = sel ? sel.toString().trim() : '';
-      if (text.length > 2) {
-        removePending();
-        try {
-          var range = sel.getRangeAt(0);
-          var span = document.createElement('span');
-          span.id = PENDING;
-          try { range.surroundContents(span); }
-          catch(e) { var frag = range.extractContents(); span.appendChild(frag); range.insertNode(span); }
-          sel.removeAllRanges();
-        } catch(e) {}
-        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_selected', text: text }));
-      } else {
-        removePending();
-        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_deselected' }));
-      }
-    }, 300);
+  }, { passive: true });
+
+  document.addEventListener('touchend', function() {
+    touching = false;
+    clearTimeout(selTimeout);
+    selTimeout = setTimeout(commitSelection, 250);
+  }, { passive: true });
+
+  document.addEventListener('selectionchange', function() {
+    if (touching || wrapping) return;
+    clearTimeout(selTimeout);
+    selTimeout = setTimeout(commitSelection, 300);
   });
+
+  function commitSelection() {
+    if (touching || wrapping) return;
+    var sel = window.getSelection();
+    var text = sel ? sel.toString().trim() : '';
+    if (text.length > 2) {
+      removePending();
+      wrapping = true;
+      try {
+        var range = sel.getRangeAt(0);
+        var span = document.createElement('span');
+        span.id = PENDING;
+        try { range.surroundContents(span); }
+        catch(e) { var frag = range.extractContents(); span.appendChild(frag); range.insertNode(span); }
+        sel.removeAllRanges();
+        setTimeout(function() { wrapping = false; }, 0);
+      } catch(e) {
+        wrapping = false;
+      }
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_selected', text: text }));
+    } else if (!document.getElementById(PENDING)) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_deselected' }));
+    }
+  }
 
   // Tap on existing highlight → send id back to RN for removal prompt
   document.addEventListener('click', function(e) {
