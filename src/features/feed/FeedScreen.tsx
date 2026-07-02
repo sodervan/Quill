@@ -434,6 +434,8 @@ export default function FeedScreen() {
   // Shuffle — ref keeps loadArticles (stable callback) in sync without adding to its deps
   const [shuffled, setShuffled] = useState(false);
   const shuffledRef = useRef(false);
+  // Tracks whether the first load has completed so focus-return calls don't re-randomize
+  const hasLoadedRef = useRef(false);
 
   // Action sheet — animations live here so they survive open/close cycles
   const sheetAnimY = useRef(new Animated.Value(500)).current;
@@ -493,7 +495,15 @@ export default function FeedScreen() {
     ]);
     setSavedIds(saved);
     setAllArticles(rows);
-    applyFilter(rows, activeFilter, shuffledRef.current);
+    // First load or pull-to-refresh: re-order. Focus-return: keep existing order so
+    // shuffle/filter state is preserved when coming back from the Reader.
+    if (!hasLoadedRef.current || fromNetwork) {
+      applyFilter(rows, activeFilter, shuffledRef.current);
+      hasLoadedRef.current = true;
+    } else {
+      // Just remove any newly-hidden articles from the existing ordered list
+      setDisplayed((prev) => prev.filter((a) => !hidden.has(a.id)));
+    }
     setLoading(false);
     setRefreshing(false);
   }, [activeFilter, applyFilter]);
