@@ -56,3 +56,18 @@ create table if not exists user_daily_log (
 alter table user_daily_log enable row level security;
 create policy "Users own their daily log"
   on user_daily_log for all using (auth.uid() = user_id);
+
+-- ── Reading progress (scroll depth + page progress, synced on leave) ─────────
+create table if not exists user_reading_progress (
+  user_id     uuid    references auth.users(id) on delete cascade,
+  article_id  text    not null,
+  pages_read  integer not null default 0,
+  total_pages integer not null default 1,
+  scroll_depth real   not null default 0,
+  completed   boolean not null default false,
+  last_read_at bigint not null,
+  primary key (user_id, article_id)
+);
+alter table user_reading_progress enable row level security;
+create policy "Users own their reading progress"
+  on user_reading_progress for all using (auth.uid() = user_id);

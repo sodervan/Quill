@@ -15,12 +15,13 @@ import * as Haptics from 'expo-haptics';
 import { RootStackParamList } from '../../navigation';
 import { colors, type as T, space, radius, shadow } from '../../theme';
 import { PUBLICATIONS } from '../../data/publications';
-import { fetchFeed, FeedItem } from '../../data/rss';
+import { fetchFeed, fetchFeedPage, FeedItem } from '../../data/rss';
+import { scrapeForArticles, deriveBlogUrl } from '../../data/scraper';
 import {
   getFollowedIds, followPublication, unfollowPublication,
-  upsertArticles, getArticlesForPublications, ArticleRow, getProgress,
+  upsertArticles, getArticlesForPublications, ArticleRow,
   isArticleSaved, saveArticle, unsaveArticle, getSavedIds,
-  getAllRemoteSources, getRemoteMetaSync,
+  getAllRemoteSources, getRemoteMetaSync, getProgressBatch,
 } from '../../data/db';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
@@ -181,8 +182,8 @@ function SwipeableCard({
 
 // ─── HeroCard ─────────────────────────────────────────────────────────────────
 
-function HeroCard({
-  article, onPress, onLongPress, showFollow, onFollow, isFollowing, isSaved,
+function HeroCardInner({
+  article, onPress, onLongPress, showFollow, onFollow, isFollowing, isSaved, progress,
 }: {
   article: ArticleRow;
   onPress: () => void;
@@ -191,17 +192,13 @@ function HeroCard({
   onFollow?: () => void;
   isFollowing?: boolean;
   isSaved?: boolean;
+  progress: number;
 }) {
   const pub = PUBLICATIONS.find((p) => p.id === article.publication_id);
   const remoteMeta = pub ? null : getRemoteMetaSync(article.publication_id);
   const c = pub?.color ?? remoteMeta?.color ?? colors.accent;
   const pubName = pub?.name ?? remoteMeta?.name ?? 'Source';
-  const feedUrl = article.link; // derive favicon from article domain — works for all pubs
-  const [progress, setProgress] = useState(0);
-
-  useEffect(() => {
-    getProgress(article.id).then((p) => { if (p) setProgress(p.pages_read / p.total_pages); });
-  }, [article.id]);
+  const feedUrl = article.link;
 
   return (
     <TouchableOpacity style={s.hero} onPress={onPress} onLongPress={onLongPress} activeOpacity={0.85} delayLongPress={380}>
@@ -252,17 +249,22 @@ function HeroCard({
           <LinearGradient colors={[c, c + 'AA']} style={[s.progressFill, { width: `${progress * 100}%` as any }]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} />
         </View>
       )}
-      <View style={[s.heroArrow, { backgroundColor: c + '20', borderColor: c + '40' }]}>
-        <Ionicons name="arrow-forward" size={16} color={c} />
-      </View>
     </TouchableOpacity>
   );
 }
 
+const HeroCard = React.memo(HeroCardInner, (prev, next) =>
+  prev.article.id === next.article.id &&
+  prev.progress === next.progress &&
+  prev.isSaved === next.isSaved &&
+  prev.isFollowing === next.isFollowing &&
+  prev.showFollow === next.showFollow,
+);
+
 // ─── ArticleCard ──────────────────────────────────────────────────────────────
 
-function ArticleCard({
-  article, onPress, onLongPress, showFollow, onFollow, isFollowing, isSaved,
+function ArticleCardInner({
+  article, onPress, onLongPress, showFollow, onFollow, isFollowing, isSaved, progress,
 }: {
   article: ArticleRow;
   onPress: () => void;
@@ -271,17 +273,13 @@ function ArticleCard({
   onFollow?: () => void;
   isFollowing?: boolean;
   isSaved?: boolean;
+  progress: number;
 }) {
   const pub = PUBLICATIONS.find((p) => p.id === article.publication_id);
   const remoteMeta = pub ? null : getRemoteMetaSync(article.publication_id);
   const c = pub?.color ?? remoteMeta?.color ?? colors.accent;
   const pubName = pub?.name ?? remoteMeta?.name ?? 'Source';
-  const feedUrl = article.link; // derive favicon from article domain — works for all pubs
-  const [progress, setProgress] = useState(0);
-
-  useEffect(() => {
-    getProgress(article.id).then((p) => { if (p) setProgress(p.pages_read / p.total_pages); });
-  }, [article.id]);
+  const feedUrl = article.link;
 
   return (
     <TouchableOpacity style={s.card} onPress={onPress} onLongPress={onLongPress} activeOpacity={0.8} delayLongPress={380}>
@@ -332,6 +330,14 @@ function ArticleCard({
     </TouchableOpacity>
   );
 }
+
+const ArticleCard = React.memo(ArticleCardInner, (prev, next) =>
+  prev.article.id === next.article.id &&
+  prev.progress === next.progress &&
+  prev.isSaved === next.isSaved &&
+  prev.isFollowing === next.isFollowing &&
+  prev.showFollow === next.showFollow,
+);
 
 // ─── ActionSheet ──────────────────────────────────────────────────────────────
 
@@ -428,8 +434,20 @@ export default function FeedScreen() {
   // Remote source metadata (for filter chips)
   const [remoteMetaMap, setRemoteMetaMap] = useState<Map<string, { name: string; color: string; feedUrl: string }>>(new Map());
 
-  // Hidden articles
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  // Pagination: nextUrl per pubId, and which pubs are currently fetching a next page
+  const [nextUrlMap, setNextUrlMap] = useState<Map<string, string>>(new Map());
+  const [loadingMoreIds, setLoadingMoreIds] = useState<Set<string>>(new Set());
+
+  // Progress for all displayed articles — refreshed as one batch query when displayed changes
+  const [progressMap, setProgressMap] = useState<Map<string, number>>(new Map());
+
+  // Hidden articles — ref keeps applyFilter stable (no stale closure on refresh)
+  const hiddenRef = useRef<Set<string>>(new Set());
+  const [hidden, setHiddenRaw] = useState<Set<string>>(new Set());
+  function setHidden(s: Set<string>) { hiddenRef.current = s; setHiddenRaw(s); }
+
+  // Article pending hide confirmation
+  const [pendingHide, setPendingHide] = useState<ArticleRow | null>(null);
 
   // Shuffle — ref keeps loadArticles (stable callback) in sync without adding to its deps
   const [shuffled, setShuffled] = useState(false);
@@ -445,6 +463,12 @@ export default function FeedScreen() {
     article: null, isSaved: false, isFollowed: false, pubName: '', pubColor: colors.accent,
   });
 
+  // Publication action sheet (long-press on filter chip)
+  const pubSheetAnimY = useRef(new Animated.Value(500)).current;
+  const pubSheetAnimBg = useRef(new Animated.Value(0)).current;
+  const [pubSheetMounted, setPubSheetMounted] = useState(false);
+  const [pubSheetData, setPubSheetData] = useState<{ id: string; name: string; color: string } | null>(null);
+
   // ── Data loading ────────────────────────────────────────────────────────────
 
   const applyFilter = useCallback((articles: ArticleRow[], filter: string | null, isShuffle = false) => {
@@ -452,19 +476,20 @@ export default function FeedScreen() {
     const ordered = isShuffle
       ? [...base].sort(() => Math.random() - 0.5)
       : interleave(base);
-    setDisplayed(ordered.filter((a) => !hidden.has(a.id)));
-  }, [hidden]);
+    setDisplayed(ordered.filter((a) => !hiddenRef.current.has(a.id)));
+  // hiddenRef is a mutable ref — intentionally not in deps so applyFilter stays stable
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function toggleShuffle() {
     const next = !shuffled;
     setShuffled(next);
     shuffledRef.current = next;
-    setActiveFilter(null);
-    applyFilter(allArticles, null, next);
+    applyFilter(allArticles, activeFilter, next);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   }
 
-  const loadArticles = useCallback(async (fromNetwork = false) => {
+  const loadArticles = useCallback(async (fromNetwork = false, forceReapply = false) => {
     const ids = await getFollowedIds();
     setFollowedIds(ids);
     if (ids.length === 0) { setAllArticles([]); setDisplayed([]); setLoading(false); setRefreshing(false); return; }
@@ -477,16 +502,36 @@ export default function FeedScreen() {
     if (fromNetwork) {
       // reuse remoteSrcList already fetched above
       const remoteById = new Map(remoteSrcList.map((r) => [r.id, r]));
+      const nextMap = new Map<string, string>();
       await Promise.all(ids.map(async (pubId) => {
         const pub = PUBLICATIONS.find((p) => p.id === pubId);
         const remote = remoteById.get(pubId);
         const feedUrl = pub?.feedUrl ?? remote?.feed_url;
         if (!feedUrl) return;
         try {
-          const items = await fetchFeed(feedUrl);
+          const { items, nextUrl } = await fetchFeedPage(feedUrl);
           await upsertArticles(items.map((item) => feedItemToRow(item, pubId)));
+          let paginationUrl = nextUrl ?? null;
+
+          // RSS returned few articles and has no next link — try scraping the blog page
+          // Threshold 25: covers feeds returning 10–24 items/page (YC=15, Naval=10, typical=20)
+          if (items.length < 25 && !nextUrl) {
+            const blogUrl = deriveBlogUrl(feedUrl);
+            if (blogUrl) {
+              try {
+                const { items: scraped, nextUrl: scrapedNext } = await scrapeForArticles(blogUrl);
+                if (scraped.length > 0) {
+                  await upsertArticles(scraped.map((item) => feedItemToRow(item, pubId)));
+                }
+                if (scrapedNext) paginationUrl = scrapedNext;
+              } catch {}
+            }
+          }
+
+          if (paginationUrl) nextMap.set(pubId, paginationUrl);
         } catch {}
       }));
+      setNextUrlMap(nextMap);
     }
 
     const [rows, saved] = await Promise.all([
@@ -495,20 +540,28 @@ export default function FeedScreen() {
     ]);
     setSavedIds(saved);
     setAllArticles(rows);
-    // First load or pull-to-refresh: re-order. Focus-return: keep existing order so
-    // shuffle/filter state is preserved when coming back from the Reader.
-    if (!hasLoadedRef.current || fromNetwork) {
+    // First load, pull-to-refresh, or forced reapply (e.g. after unfollow): re-order.
+    // Focus-return: keep existing order so shuffle/filter state is preserved.
+    if (!hasLoadedRef.current || fromNetwork || forceReapply) {
       applyFilter(rows, activeFilter, shuffledRef.current);
       hasLoadedRef.current = true;
     } else {
       // Just remove any newly-hidden articles from the existing ordered list
-      setDisplayed((prev) => prev.filter((a) => !hidden.has(a.id)));
+      setDisplayed((prev) => prev.filter((a) => !hiddenRef.current.has(a.id)));
     }
     setLoading(false);
     setRefreshing(false);
   }, [activeFilter, applyFilter]);
 
-  useFocusEffect(useCallback(() => { void loadArticles(false); }, [loadArticles]));
+  useFocusEffect(useCallback(() => {
+    void loadArticles(false);
+  }, [loadArticles]));
+
+  // Batch-refresh progress whenever the displayed list changes (including focus returns)
+  useEffect(() => {
+    if (displayed.length === 0) return;
+    void getProgressBatch(displayed.map((a) => a.id)).then(setProgressMap);
+  }, [displayed]);
   useEffect(() => { void loadArticles(true); }, []);
 
   const loadExploreArticles = useCallback(async () => {
@@ -541,7 +594,55 @@ export default function FeedScreen() {
     }
   }, [exploreArticles.length, hidden]);
 
-  const onRefresh = useCallback(() => { setRefreshing(true); void loadArticles(true); }, [loadArticles]);
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    setHidden(new Set()); // pull-to-refresh restores all hidden articles
+    void loadArticles(true);
+  }, [loadArticles]);
+
+  async function handleLoadMore(pubId: string) {
+    const url = nextUrlMap.get(pubId);
+    if (!url || loadingMoreIds.has(pubId)) return;
+    setLoadingMoreIds((prev) => new Set(prev).add(pubId));
+    try {
+      // Try RSS; if empty (URL is a web page, not a feed) fall back to scraping
+      let result: { items: FeedItem[]; nextUrl: string | null };
+      try {
+        result = await fetchFeedPage(url);
+        if (result.items.length === 0) throw new Error('empty');
+      } catch {
+        result = await scrapeForArticles(url);
+      }
+      const { items, nextUrl } = result;
+
+      await upsertArticles(items.map((item) => feedItemToRow(item, pubId)));
+
+      // Update pagination pointer (advance or remove)
+      setNextUrlMap((prev) => {
+        const m = new Map(prev);
+        if (nextUrl) m.set(pubId, nextUrl);
+        else m.delete(pubId);
+        return m;
+      });
+
+      // Re-query SQLite for this pub — authoritative, picks up whatever was just upserted
+      const freshRows = await getArticlesForPublications([pubId]);
+      setAllArticles((prev) => {
+        const existing = new Set(prev.map((a) => a.id));
+        const added = freshRows.filter((a) => !existing.has(a.id));
+        return added.length ? [...prev, ...added] : prev;
+      });
+      setDisplayed((prev) => {
+        const existing = new Set(prev.map((a) => a.id));
+        const toAdd = freshRows.filter(
+          (a) => !existing.has(a.id) && !hidden.has(a.id) &&
+            (!activeFilter || activeFilter === pubId),
+        );
+        return toAdd.length ? [...prev, ...toAdd] : prev;
+      });
+    } catch {}
+    setLoadingMoreIds((prev) => { const s = new Set(prev); s.delete(pubId); return s; });
+  }
 
   function selectFilter(id: string | null) {
     setShuffled(false);
@@ -587,7 +688,15 @@ export default function FeedScreen() {
   }
 
   function handleHide(article: ArticleRow) {
-    setHidden((prev) => new Set(prev).add(article.id));
+    setPendingHide(article);
+  }
+
+  function confirmHide() {
+    if (!pendingHide) return;
+    const article = pendingHide;
+    setPendingHide(null);
+    const next = new Set(hiddenRef.current).add(article.id);
+    setHidden(next);
     if (feedTab === 'following') {
       setDisplayed((prev) => prev.filter((a) => a.id !== article.id));
     } else {
@@ -645,6 +754,34 @@ export default function FeedScreen() {
     ]).start(() => setSheetMounted(false));
   }
 
+  function openPubSheet(pub: { id: string; name: string; color: string }) {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setPubSheetData(pub);
+    pubSheetAnimY.setValue(500);
+    pubSheetAnimBg.setValue(0);
+    setPubSheetMounted(true);
+    Animated.parallel([
+      Animated.spring(pubSheetAnimY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 13 }),
+      Animated.timing(pubSheetAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }
+
+  function closePubSheet() {
+    Animated.parallel([
+      Animated.timing(pubSheetAnimY, { toValue: 500, duration: 260, useNativeDriver: true }),
+      Animated.timing(pubSheetAnimBg, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => setPubSheetMounted(false));
+  }
+
+  async function handleUnfollowPub() {
+    if (!pubSheetData) return;
+    const { id } = pubSheetData;
+    closePubSheet();
+    if (activeFilter === id) setActiveFilter(null);
+    await unfollowPublication(id);
+    void loadArticles(false, true);
+  }
+
   async function handleSheetAction(action: string) {
     const article = sheetData.article;
     if (!article) return;
@@ -669,7 +806,7 @@ export default function FeedScreen() {
       case 'follow':
         if (sheetData.isFollowed) {
           await unfollowPublication(article.publication_id);
-          void loadArticles(false);
+          void loadArticles(false, true);
         } else {
           await followPublication(article.publication_id);
           const pub = PUBLICATIONS.find((p) => p.id === article.publication_id);
@@ -687,7 +824,7 @@ export default function FeedScreen() {
 
   const tabIndicatorX = tabAnim.interpolate({ inputRange: [0, 1], outputRange: [0, HALF_W] });
 
-  function renderItem({ item, index }: { item: ArticleRow; index: number }) {
+  const renderItem = useCallback(({ item, index }: { item: ArticleRow; index: number }) => {
     const isExplore = feedTab === 'explore';
     const pubIsFollowed = isExplore
       ? exploreFollowedSet.has(item.publication_id)
@@ -701,6 +838,7 @@ export default function FeedScreen() {
       onFollow: () => void handleExploreFollow(item.publication_id),
       isFollowing: isPending,
       isSaved: savedIds.has(item.id),
+      progress: progressMap.get(item.id) ?? 0,
     };
 
     return (
@@ -714,7 +852,7 @@ export default function FeedScreen() {
         }
       </SwipeableCard>
     );
-  }
+  }, [feedTab, exploreFollowedSet, followedIds, followingPubId, savedIds, progressMap, hidden]);
 
   // ── Early returns ──────────────────────────────────────────────────────────
 
@@ -796,6 +934,8 @@ export default function FeedScreen() {
                   key={pub.id}
                   style={[s.filterChip, active && { backgroundColor: pub.color + '1A', borderColor: pub.color + '60' }]}
                   onPress={() => selectFilter(active ? null : pub.id)}
+                  onLongPress={() => openPubSheet({ id: pub.id, name: pub.name, color: pub.color })}
+                  delayLongPress={350}
                 >
                   <FaviconIcon feedUrl={pub.feedUrl} emoji={pub.emoji} size={16} />
                   <Text style={[s.filterChipText, active && { color: pub.color }]}>{pub.name}</Text>
@@ -826,6 +966,11 @@ export default function FeedScreen() {
             showsVerticalScrollIndicator={false}
             onScroll={handleScroll}
             scrollEventThrottle={16}
+            removeClippedSubviews
+            maxToRenderPerBatch={8}
+            updateCellsBatchingPeriod={50}
+            windowSize={10}
+            initialNumToRender={10}
             refreshControl={
               feedTab === 'following'
                 ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} />
@@ -833,6 +978,42 @@ export default function FeedScreen() {
             }
             renderItem={renderItem}
             ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+            ListFooterComponent={(() => {
+              if (feedTab !== 'following') return null;
+              const visiblePubIds = [...nextUrlMap.keys()].filter(
+                (pubId) => !activeFilter || activeFilter === pubId,
+              );
+              if (visiblePubIds.length === 0) return null;
+              return (
+                <View style={s.loadMoreSection}>
+                  <Text style={s.loadMoreHeading}>More available</Text>
+                  {visiblePubIds.map((pubId) => {
+                    const pub = PUBLICATIONS.find((p) => p.id === pubId);
+                    const rm = remoteMetaMap.get(pubId);
+                    const name = pub?.name ?? rm?.name ?? 'Source';
+                    const color = pub?.color ?? rm?.color ?? colors.accent;
+                    const isLoading = loadingMoreIds.has(pubId);
+                    return (
+                      <TouchableOpacity
+                        key={pubId}
+                        style={[s.loadMoreBtn, { borderColor: color + '55', backgroundColor: color + '12' }]}
+                        onPress={() => void handleLoadMore(pubId)}
+                        disabled={isLoading}
+                        activeOpacity={0.7}
+                      >
+                        {isLoading
+                          ? <ActivityIndicator size="small" color={color} />
+                          : <Ionicons name="add-circle-outline" size={18} color={color} />
+                        }
+                        <Text style={[s.loadMoreText, { color }]}>
+                          {isLoading ? 'Loading…' : `Load more from ${name}`}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              );
+            })()}
             ListEmptyComponent={
               <View style={s.centered}>
                 <Ionicons name="newspaper-outline" size={48} color={colors.textMuted} />
@@ -860,6 +1041,60 @@ export default function FeedScreen() {
         onClose={closeSheet}
         onAction={handleSheetAction}
       />
+
+      {/* ── Hide confirmation modal ── */}
+      {pendingHide && (
+        <Modal transparent animationType="fade" visible={!!pendingHide} onRequestClose={() => setPendingHide(null)} statusBarTranslucent>
+          <View style={s.hideModalOverlay}>
+            <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setPendingHide(null)} activeOpacity={1} />
+            <View style={s.hideModal}>
+              <View style={s.hideModalIconRow}>
+                <View style={s.hideModalIconWrap}>
+                  <Ionicons name="eye-off-outline" size={22} color="#94A3B8" />
+                </View>
+                <Text style={s.hideModalHeading}>Hide article?</Text>
+              </View>
+              <Text style={s.hideModalTitle} numberOfLines={3}>{pendingHide.title}</Text>
+              <Text style={s.hideModalSub}>
+                It won't appear in your feed.{'\n'}Pull down to refresh to restore it.
+              </Text>
+              <View style={s.hideModalActions}>
+                <TouchableOpacity style={s.hideModalKeep} onPress={() => setPendingHide(null)} activeOpacity={0.8}>
+                  <Text style={s.hideModalKeepText}>Keep</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.hideModalConfirm} onPress={confirmHide} activeOpacity={0.8}>
+                  <Ionicons name="eye-off-outline" size={15} color="white" />
+                  <Text style={s.hideModalConfirmText}>Hide</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* ── Publication sheet (long-press filter chip) ── */}
+      {pubSheetMounted && pubSheetData && (
+        <Modal transparent animationType="none" visible={pubSheetMounted} onRequestClose={closePubSheet} statusBarTranslucent>
+          <Animated.View style={[StyleSheet.absoluteFill, { opacity: pubSheetAnimBg }]}>
+            <TouchableOpacity style={[StyleSheet.absoluteFill, s.sheetBackdrop]} onPress={closePubSheet} activeOpacity={1} />
+          </Animated.View>
+          <Animated.View style={[s.sheet, { transform: [{ translateY: pubSheetAnimY }] }]}>
+            <View style={s.sheetHandle} />
+            <View style={[s.sheetPubBadge, { backgroundColor: pubSheetData.color + '22', borderColor: pubSheetData.color + '44' }]}>
+              <Text style={[s.sheetPubName, { color: pubSheetData.color }]}>{pubSheetData.name}</Text>
+            </View>
+            <View style={s.sheetDivider} />
+            <TouchableOpacity style={s.sheetRow} onPress={() => void handleUnfollowPub()} activeOpacity={0.7}>
+              <View style={[s.sheetRowIcon, { backgroundColor: colors.flame + '18' }]}>
+                <Ionicons name="person-remove-outline" size={20} color={colors.flame} />
+              </View>
+              <Text style={[s.sheetRowLabel, { color: colors.flame }]}>Unfollow {pubSheetData.name}</Text>
+              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+            <View style={{ height: 24 }} />
+          </Animated.View>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -936,11 +1171,6 @@ const s = StyleSheet.create({
   heroTitle: { ...T.h1, color: colors.text, marginBottom: space.xs, lineHeight: 28 },
   heroExcerpt: { ...T.body, color: colors.textSecondary, lineHeight: 22, marginBottom: space.sm },
   heroMeta: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: space.sm },
-  heroArrow: {
-    position: 'absolute', bottom: space.md, right: space.md,
-    width: 32, height: 32, borderRadius: 16,
-    alignItems: 'center', justifyContent: 'center', borderWidth: 1,
-  },
   progressTrack: {
     height: 3, backgroundColor: colors.surfaceHigher,
     borderRadius: 2, overflow: 'hidden', marginBottom: space.xs,
@@ -1032,4 +1262,53 @@ const s = StyleSheet.create({
 
   emptyTitle: { ...T.h2, color: colors.text },
   emptySub: { ...T.body, color: colors.textMuted, textAlign: 'center' },
+
+  loadMoreSection: { paddingTop: 20, paddingBottom: 16, gap: 10 },
+  loadMoreHeading: { ...T.label, color: colors.textMuted, marginBottom: 4 },
+  loadMoreBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: 16, paddingVertical: 14,
+    borderRadius: radius.lg, borderWidth: 1,
+  },
+  loadMoreText: { ...T.body, fontWeight: '600' },
+
+  // Hide confirmation modal
+  hideModalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24,
+  },
+  hideModal: {
+    backgroundColor: colors.surface, borderRadius: 20,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: 24, paddingTop: 24, paddingBottom: 20,
+    width: '100%', maxWidth: 360,
+    shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 24, shadowOffset: { width: 0, height: 8 },
+    elevation: 16,
+  },
+  hideModalIconRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
+  hideModalIconWrap: {
+    width: 38, height: 38, borderRadius: 19,
+    backgroundColor: '#94A3B8' + '18', borderWidth: 1, borderColor: '#94A3B8' + '30',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  hideModalHeading: { ...T.h2, color: colors.text },
+  hideModalTitle: {
+    ...T.h3, color: colors.textSecondary,
+    lineHeight: 22, marginBottom: 10,
+  },
+  hideModalSub: { ...T.caption, color: colors.textMuted, lineHeight: 18, marginBottom: 24 },
+  hideModalActions: { flexDirection: 'row', gap: 10 },
+  hideModalKeep: {
+    flex: 1, paddingVertical: 13,
+    borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.surfaceHigher,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  hideModalKeepText: { ...T.body, color: colors.text, fontWeight: '600' },
+  hideModalConfirm: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 13, borderRadius: radius.md,
+    backgroundColor: '#475569',
+  },
+  hideModalConfirmText: { ...T.body, color: 'white', fontWeight: '700' },
 });

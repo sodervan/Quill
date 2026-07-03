@@ -83,12 +83,39 @@ export async function syncUnsave(articleId: string): Promise<void> {
   } catch {}
 }
 
-export async function syncDailyLog(date: string, qualifyingReads: number): Promise<void> {
+export async function syncReadingProgress(articleId: string): Promise<void> {
+  const userId = await uid();
+  if (!userId) return;
+  try {
+    const db = await import('../data/db');
+    const row = await db.getProgress(articleId);
+    if (!row) return;
+    await supabase.from('user_reading_progress').upsert({
+      user_id: userId,
+      article_id: articleId,
+      pages_read: row.pages_read,
+      total_pages: row.total_pages,
+      scroll_depth: row.scroll_depth,
+      completed: row.completed === 1,
+      last_read_at: row.last_read_at,
+    });
+  } catch {}
+}
+
+export async function syncGoal(goal: number): Promise<void> {
+  const userId = await uid();
+  if (!userId) return;
+  try {
+    await supabase.from('user_settings').upsert({ user_id: userId, key: 'daily_goal', value: String(goal) });
+  } catch {}
+}
+
+export async function syncDailyLog(date: string, qualifyingReads: number, pagesRead = 0): Promise<void> {
   const userId = await uid();
   if (!userId) return;
   try {
     await supabase.from('user_daily_log').upsert({
-      user_id: userId, date, qualifying_reads: qualifyingReads,
+      user_id: userId, date, qualifying_reads: qualifyingReads, pages_read: pagesRead,
     });
   } catch {}
 }
@@ -214,17 +241,23 @@ export async function uploadLocalToSupabase(): Promise<void> {
     }
   } catch {}
 
-  // 4. Daily log (streaks)
+  // 4. Daily log (streaks + pages)
   try {
     const rawDb = db.getDb();
-    const logs = await rawDb.getAllAsync<{ date: string; qualifying_reads: number }>(
-      `SELECT date, qualifying_reads FROM daily_log`,
+    const logs = await rawDb.getAllAsync<{ date: string; qualifying_reads: number; pages_read: number }>(
+      `SELECT date, qualifying_reads, pages_read FROM daily_log`,
     );
     if (logs.length > 0) {
       await supabase.from('user_daily_log').upsert(
-        logs.map((l) => ({ user_id: userId, date: l.date, qualifying_reads: l.qualifying_reads })),
+        logs.map((l) => ({ user_id: userId, date: l.date, qualifying_reads: l.qualifying_reads, pages_read: l.pages_read ?? 0 })),
       );
     }
+  } catch {}
+
+  // 7. User settings (daily goal)
+  try {
+    const goal = await db.getDailyGoal();
+    await supabase.from('user_settings').upsert({ user_id: userId, key: 'daily_goal', value: String(goal) });
   } catch {}
 
   // 5. Highlights
@@ -238,6 +271,28 @@ export async function uploadLocalToSupabase(): Promise<void> {
           selected_text: h.selected_text,
           color: h.color,
           created_at: h.created_at,
+        })),
+      );
+    }
+  } catch {}
+
+  // 6. Reading progress
+  try {
+    const rawDb = db.getDb();
+    const progress = await rawDb.getAllAsync<{
+      article_id: string; pages_read: number; total_pages: number;
+      scroll_depth: number; completed: number; last_read_at: number;
+    }>(`SELECT * FROM reading_progress`);
+    if (progress.length > 0) {
+      await supabase.from('user_reading_progress').upsert(
+        progress.map((p) => ({
+          user_id: userId,
+          article_id: p.article_id,
+          pages_read: p.pages_read,
+          total_pages: p.total_pages,
+          scroll_depth: p.scroll_depth ?? 0,
+          completed: p.completed === 1,
+          last_read_at: p.last_read_at,
         })),
       );
     }
@@ -257,6 +312,7 @@ export async function restoreFromSupabase(): Promise<void> {
   const db = await import('../data/db');
 
   // 1. Restore followed curated publications
+  let restoredFollowCount = 0;
   try {
     const { data: sources } = await supabase
       .from('user_sources')
@@ -264,8 +320,8 @@ export async function restoreFromSupabase(): Promise<void> {
       .eq('user_id', userId);
 
     if (sources?.length) {
+      restoredFollowCount += sources.length;
       for (const { source_id } of sources) {
-        // Use db directly to avoid re-triggering sync on restore
         const rawDb = db.getDb();
         await rawDb.runAsync(
           `INSERT OR IGNORE INTO followed_publications (id, followed_at) VALUES (?, ?)`,
@@ -283,6 +339,7 @@ export async function restoreFromSupabase(): Promise<void> {
       .eq('user_id', userId);
 
     if (remoteSrcs?.length) {
+      restoredFollowCount += remoteSrcs.length;
       for (const r of remoteSrcs) {
         const src: RemoteSourceRow = {
           id: r.source_id,
@@ -301,6 +358,11 @@ export async function restoreFromSupabase(): Promise<void> {
       }
     }
   } catch {}
+
+  // Existing users have already been through onboarding — skip it on sign-in
+  if (restoredFollowCount > 0) {
+    try { await db.setSetting('onboarding_done', '1'); } catch {}
+  }
 
   // 3. Restore saved articles (full metadata so Library shows content)
   try {
@@ -335,21 +397,37 @@ export async function restoreFromSupabase(): Promise<void> {
     }
   } catch {}
 
-  // 4. Restore daily log (streaks)
+  // 4. Restore daily log (streaks + pages)
   try {
     const { data: logs } = await supabase
       .from('user_daily_log')
-      .select('date, qualifying_reads')
+      .select('date, qualifying_reads, pages_read')
       .eq('user_id', userId);
 
     if (logs?.length) {
       const rawDb = db.getDb();
       for (const l of logs) {
         await rawDb.runAsync(
-          `INSERT INTO daily_log (date, qualifying_reads) VALUES (?, ?)
-           ON CONFLICT(date) DO UPDATE SET qualifying_reads = MAX(qualifying_reads, excluded.qualifying_reads)`,
-          [l.date, l.qualifying_reads],
+          `INSERT INTO daily_log (date, qualifying_reads, pages_read) VALUES (?, ?, ?)
+           ON CONFLICT(date) DO UPDATE SET
+             qualifying_reads = MAX(qualifying_reads, excluded.qualifying_reads),
+             pages_read = MAX(pages_read, excluded.pages_read)`,
+          [l.date, l.qualifying_reads, l.pages_read ?? 0],
         );
+      }
+    }
+  } catch {}
+
+  // 7. Restore user settings (daily goal etc.)
+  try {
+    const { data: settings } = await supabase
+      .from('user_settings')
+      .select('key, value')
+      .eq('user_id', userId);
+
+    if (settings?.length) {
+      for (const s of settings) {
+        await db.setSetting(s.key, s.value);
       }
     }
   } catch {}
@@ -367,6 +445,30 @@ export async function restoreFromSupabase(): Promise<void> {
         await rawDb.runAsync(
           `INSERT OR IGNORE INTO highlights (article_id, selected_text, color, created_at) VALUES (?, ?, ?, ?)`,
           [h.article_id, h.selected_text, h.color, h.created_at],
+        );
+      }
+    }
+  } catch {}
+
+  // 6. Restore reading progress
+  try {
+    const { data: progress } = await supabase
+      .from('user_reading_progress')
+      .select('*')
+      .eq('user_id', userId);
+
+    if (progress?.length) {
+      const rawDb = db.getDb();
+      for (const p of progress) {
+        await rawDb.runAsync(
+          `INSERT INTO reading_progress (article_id, pages_read, total_pages, scroll_depth, completed, last_read_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(article_id) DO UPDATE SET
+             pages_read = MAX(pages_read, excluded.pages_read),
+             scroll_depth = MAX(scroll_depth, excluded.scroll_depth),
+             completed = MAX(completed, excluded.completed),
+             last_read_at = MAX(last_read_at, excluded.last_read_at)`,
+          [p.article_id, p.pages_read, p.total_pages, p.scroll_depth ?? 0, p.completed ? 1 : 0, p.last_read_at],
         );
       }
     }

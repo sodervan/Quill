@@ -108,16 +108,24 @@ export default function Navigation() {
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session) {
-        // On fresh sign-in: upload local data then pull any cloud-only data
         if (_event === 'SIGNED_IN') {
+          // Await full restore before checking onboarding_done — restore may set it to '1'
+          // for existing users, and also ensures followed pubs are in SQLite before FeedScreen loads.
           import('../lib/sync').then(async (m) => {
             await m.uploadLocalToSupabase();
             await m.restoreFromSupabase();
-          }).catch(() => {});
+            const val = await getSetting('onboarding_done');
+            setStage(val === '1' ? 'app' : 'onboarding');
+          }).catch(async () => {
+            const val = await getSetting('onboarding_done');
+            setStage(val === '1' ? 'app' : 'onboarding');
+          });
+        } else {
+          // TOKEN_REFRESHED etc — just sync state without blocking
+          getSetting('onboarding_done').then((val) => {
+            setStage(val === '1' ? 'app' : 'onboarding');
+          });
         }
-        getSetting('onboarding_done').then((val) => {
-          setStage(val === '1' ? 'app' : 'onboarding');
-        });
       } else if (_event === 'SIGNED_OUT') {
         setStage('auth');
       }

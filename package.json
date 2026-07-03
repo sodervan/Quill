@@ -11,6 +11,7 @@
     "@supabase/supabase-js": "^2.110.0",
     "date-fns": "^4.4.0",
     "expo": "~56.0.0",
+    "expo-dev-client": "~56.0.21",
     "expo-haptics": "^57.0.0",
     "expo-linear-gradient": "^57.0.0",
     "expo-sqlite": "~56.0.0",

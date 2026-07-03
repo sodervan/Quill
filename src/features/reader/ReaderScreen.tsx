@@ -16,10 +16,10 @@ import { colors, type as T, space, radius } from '../../theme';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
 import { PUBLICATIONS } from '../../data/publications';
 import {
-  getArticleById, recordPageRead, updateArticleWordCount,
+  getArticleById, recordPageRead, recordScrollProgress, updateArticleWordCount,
   logReadEvent, isArticleSaved, saveArticle, unsaveArticle,
   saveHighlight, getHighlightsForArticle, deleteHighlight, type HighlightRow,
-  getRemoteMetaSync,
+  getRemoteMetaSync, getProgress,
 } from '../../data/db';
 import { resolveArticleContent } from '../../data/extractor';
 
@@ -50,7 +50,11 @@ export default function ReaderScreen({ route, navigation }: Props) {
 
   const readStartRef = useRef<number>(Date.now());
   const scrollDepthRef = useRef(0);
+  const scrollModeDepthRef = useRef(0);
+  const restoreDepthRef = useRef(0);
   const webViewRef = useRef<any>(null);
+
+  const [initialPage, setInitialPage] = useState(0);
 
   const pub = PUBLICATIONS.find((p) => p.id === publicationId);
   const remoteMeta = pub ? null : getRemoteMetaSync(publicationId);
@@ -68,12 +72,23 @@ export default function ReaderScreen({ route, navigation }: Props) {
       setArticleLink(article.link);
       setArticleUrl(article.link);
       if (article.pub_date > 0) setPubDate(new Date(article.pub_date));
-      const [isSaved, existingHighlights] = await Promise.all([
+      const [isSaved, existingHighlights, savedProgress] = await Promise.all([
         isArticleSaved(articleId),
         getHighlightsForArticle(articleId),
+        getProgress(articleId),
       ]);
       setSaved(isSaved);
       setHighlights(existingHighlights);
+
+      if (savedProgress) {
+        // Restore scroll position — prefer scroll_depth; fall back to page fraction
+        let depth = savedProgress.scroll_depth ?? 0;
+        if (depth < 0.02 && savedProgress.pages_read > 1 && savedProgress.total_pages > 0) {
+          depth = (savedProgress.pages_read - 1) / savedProgress.total_pages;
+        }
+        restoreDepthRef.current = depth;
+        setInitialPage(Math.max(0, savedProgress.pages_read - 1));
+      }
       if (article.content_html) setRawHtml(article.content_html);
       readStartRef.current = Date.now();
 
@@ -104,6 +119,9 @@ export default function ReaderScreen({ route, navigation }: Props) {
     return () => {
       const seconds = Math.floor((Date.now() - readStartRef.current) / 1000);
       void logReadEvent(articleId, seconds, scrollDepthRef.current);
+      if (scrollModeDepthRef.current > 0) {
+        void recordScrollProgress(articleId, scrollModeDepthRef.current);
+      }
     };
   }, [articleId]);
 
@@ -148,6 +166,25 @@ export default function ReaderScreen({ route, navigation }: Props) {
     ]);
   }
 
+  function onWebViewLoadEnd() {
+    const depth = restoreDepthRef.current;
+    if (depth < 0.02) return;
+    // Retry until scrollHeight is ready (images / fonts may still be loading)
+    webViewRef.current?.injectJavaScript(`
+      (function(){
+        var d=${depth.toFixed(4)}, tries=0;
+        function go(){
+          var h=document.documentElement.scrollHeight;
+          if(h>window.innerHeight*1.5||tries>20){
+            window.scrollTo({top:Math.round(d*h),behavior:'smooth'});
+          } else { tries++; setTimeout(go,120); }
+        }
+        setTimeout(go,250);
+      })();
+      true;
+    `);
+  }
+
   function onWebMessage(e: { nativeEvent: { data: string } }) {
     const raw = e.nativeEvent.data;
     try {
@@ -164,6 +201,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
     const depth = parseFloat(raw);
     if (!isNaN(depth)) {
       scrollDepthRef.current = depth;
+      scrollModeDepthRef.current = depth;
       setScrollProgress(depth);
     }
   }
@@ -286,6 +324,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
             style={{ flex: 1, backgroundColor: colors.bgDeep }}
             injectedJavaScript={READER_JS}
             onMessage={onWebMessage}
+            onLoadEnd={onWebViewLoadEnd}
             showsVerticalScrollIndicator={false}
             originWhitelist={['*']}
           />
@@ -293,7 +332,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
           /* ── Horizontal page mode ── */
           <PagerView
             style={{ flex: 1 }}
-            initialPage={0}
+            initialPage={initialPage}
             onPageSelected={onPageSelected}
             orientation="horizontal"
           >
@@ -339,7 +378,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
                 onPress={() => {
                   setSelectedText('');
                   webViewRef.current?.injectJavaScript(
-                    `(function(){var el=document.getElementById('__ql_pending');if(!el)return;var p=el.parentNode;if(p){while(el.firstChild)p.insertBefore(el.firstChild,el);p.removeChild(el);}})();true;`
+                    `window.__savedRange=null;var s=window.getSelection();if(s)s.removeAllRanges();true;`
                   );
                 }}
                 style={s.highlightDismiss}
@@ -406,37 +445,21 @@ const READER_JS = `
   }
   window.addEventListener('scroll', reportScroll, { passive: true });
 
-  // Text selection: capture range into a pending span so it survives the RN button tap.
-  // Key guard: after wrapping we call removeAllRanges(), which fires another selectionchange.
-  // That second event has empty text AND the pending span already exists, so we early-return
-  // instead of calling removePending() and undoing the commit.
-  var PENDING = '__ql_pending';
-  function removePending() {
-    var el = document.getElementById(PENDING);
-    if (!el) return;
-    var p = el.parentNode;
-    if (p) { while (el.firstChild) p.insertBefore(el.firstChild, el); p.removeChild(el); }
-  }
+  // Text selection: save the live range into window.__savedRange so it can be used when the
+  // color button is tapped. We do NOT clear the selection so the native Copy/Select-All menu
+  // stays visible. The cloned Range remains valid even after WebView focus is transferred to RN.
+  window.__savedRange = null;
   var selTimeout;
   document.addEventListener('selectionchange', function() {
     clearTimeout(selTimeout);
     selTimeout = setTimeout(function() {
       var sel = window.getSelection();
       var text = sel ? sel.toString().trim() : '';
-      // Pending span already committed and no new text — this is the removeAllRanges() echo; skip.
-      if (document.getElementById(PENDING) && text.length <= 2) return;
       if (text.length > 2) {
-        removePending();
-        try {
-          var range = sel.getRangeAt(0);
-          var span = document.createElement('span');
-          span.id = PENDING;
-          try { range.surroundContents(span); }
-          catch(e) { var frag = range.extractContents(); span.appendChild(frag); range.insertNode(span); }
-          sel.removeAllRanges();
-        } catch(e) {}
+        try { window.__savedRange = sel.getRangeAt(0).cloneRange(); } catch(e) { window.__savedRange = null; }
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_selected', text: text }));
       } else {
+        window.__savedRange = null;
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_deselected' }));
       }
     }, 400);
@@ -469,13 +492,17 @@ function buildInjectMarkJS(text: string, id: number, color: string): string {
     return m;
   }
   // Primary: convert the pending span captured at selection time
-  var span=document.getElementById('__ql_pending');
-  if(span){
-    var mark=makeMark();
-    while(span.firstChild)mark.appendChild(span.firstChild);
-    span.parentNode.replaceChild(mark,span);
-    window.getSelection().removeAllRanges();
-    return;
+  // Primary: use the range saved at selection time (survives focus transfer to RN)
+  var range=window.__savedRange;
+  if(range){
+    window.__savedRange=null;
+    try{
+      var mark=makeMark();
+      try{range.surroundContents(mark);}
+      catch(e){var frag=range.extractContents();mark.appendChild(frag);range.insertNode(mark);}
+      window.getSelection().removeAllRanges();
+      return;
+    }catch(e){}
   }
   // Fallback: walk text nodes (works for simple single-node selections)
   var text=${JSON.stringify(text)};

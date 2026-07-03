@@ -8,7 +8,8 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import {
-  computeStreak, getTodayReads, getDailyGoal, setDailyGoal, getFollowedIds, setSetting,
+  computeStreak, getTodayPages, getDailyGoal, setDailyGoal,
+  getFollowedIds, setSetting, getDailyLogHistory,
 } from '../../data/db';
 import { supabase } from '../../lib/supabase';
 import { colors, type as T, space, radius, shadow } from '../../theme';
@@ -16,25 +17,122 @@ import { RootStackParamList } from '../../navigation';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const CELL = 12;
+const GAP = 2;
+const STEP = CELL + GAP;
+const WEEKS = 16;
+
+function cellColor(pages: number): string {
+  if (pages === 0) return '#1E2D45';
+  if (pages <= 2) return '#0d3d1f';
+  if (pages <= 5) return '#14532d';
+  if (pages <= 9) return '#166534';
+  if (pages <= 14) return '#15803d';
+  return '#22c55e';
+}
+
+function ContributionGraph({ history }: { history: { date: string; pages: number }[] }) {
+  const today = new Date();
+  const todayDow = today.getDay(); // 0=Sun
+
+  // Align to the Sunday that starts the oldest week
+  const startSunday = new Date(today);
+  startSunday.setDate(today.getDate() - todayDow - (WEEKS - 1) * 7);
+  startSunday.setHours(0, 0, 0, 0);
+
+  const dataMap = new Map(history.map((h) => [h.date, h.pages]));
+
+  // Build grid: grid[week][dayOfWeek]
+  const grid: { date: string; pages: number; isFuture: boolean }[][] = [];
+  for (let w = 0; w < WEEKS; w++) {
+    const week: { date: string; pages: number; isFuture: boolean }[] = [];
+    for (let d = 0; d < 7; d++) {
+      const date = new Date(startSunday);
+      date.setDate(startSunday.getDate() + w * 7 + d);
+      const key = date.toISOString().slice(0, 10);
+      week.push({ date: key, pages: dataMap.get(key) ?? 0, isFuture: date > today });
+    }
+    grid.push(week);
+  }
+
+  // Month label for first col of each new month
+  const monthLabels: (string | null)[] = grid.map((week) => {
+    const firstDay = new Date(week[0].date);
+    return firstDay.getDate() <= 7 ? MONTHS[firstDay.getMonth()] : null;
+  });
+
+  return (
+    <View>
+      {/* Month row */}
+      <View style={{ flexDirection: 'row', marginBottom: 3 }}>
+        {grid.map((_, w) => (
+          <View key={w} style={{ width: STEP }}>
+            {monthLabels[w] ? (
+              <Text style={cg.monthLabel}>{monthLabels[w]}</Text>
+            ) : null}
+          </View>
+        ))}
+      </View>
+
+      {/* Cells */}
+      <View style={{ flexDirection: 'row', gap: GAP }}>
+        {grid.map((week, w) => (
+          <View key={w} style={{ gap: GAP }}>
+            {week.map((cell, d) => (
+              <View
+                key={d}
+                style={[
+                  cg.cell,
+                  { backgroundColor: cell.isFuture ? 'transparent' : cellColor(cell.pages) },
+                ]}
+              />
+            ))}
+          </View>
+        ))}
+      </View>
+
+      {/* Legend */}
+      <View style={cg.legendRow}>
+        <Text style={cg.legendText}>Less</Text>
+        {[0, 3, 6, 10, 15].map((n) => (
+          <View key={n} style={[cg.cell, { backgroundColor: cellColor(n) }]} />
+        ))}
+        <Text style={cg.legendText}>More</Text>
+      </View>
+    </View>
+  );
+}
+
+const cg = StyleSheet.create({
+  cell: { width: CELL, height: CELL, borderRadius: 2 },
+  monthLabel: { fontSize: 8, color: colors.textMuted, lineHeight: 10 },
+  legendRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 8, justifyContent: 'flex-end' },
+  legendText: { fontSize: 9, color: colors.textMuted },
+});
+
 export default function ProfileScreen() {
   const nav = useNavigation<Nav>();
   const [streak, setStreak] = useState(0);
-  const [todayReads, setTodayReads] = useState(0);
-  const [goal, setGoal] = useState(3);
+  const [todayPages, setTodayPages] = useState(0);
+  const [goal, setGoal] = useState(5);
   const [followedCount, setFollowedCount] = useState(0);
   const [darkMode] = useState(true);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [history, setHistory] = useState<{ date: string; pages: number }[]>([]);
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
       (async () => {
-        const [s, t, g, f] = await Promise.all([
-          computeStreak(), getTodayReads(), getDailyGoal(), getFollowedIds(),
+        const [s, p, g, f, hist] = await Promise.all([
+          computeStreak(), getTodayPages(), getDailyGoal(), getFollowedIds(),
+          getDailyLogHistory(WEEKS * 7),
         ]);
         const { data: { session } } = await supabase.auth.getSession();
         if (active) {
-          setStreak(s); setTodayReads(t); setGoal(g); setFollowedCount(f.length);
+          setStreak(s); setTodayPages(p); setGoal(g); setFollowedCount(f.length);
+          setHistory(hist);
           setUserEmail(session?.user?.email ?? null);
         }
       })();
@@ -55,12 +153,12 @@ export default function ProfileScreen() {
   }
 
   async function nudgeGoal(delta: number) {
-    const next = Math.max(1, Math.min(20, goal + delta));
+    const next = Math.max(1, Math.min(50, goal + delta));
     setGoal(next);
     await setDailyGoal(next);
   }
 
-  const progress = Math.min(1, todayReads / goal);
+  const progress = Math.min(1, todayPages / goal);
   const progressPct = Math.round(progress * 100);
 
   return (
@@ -123,8 +221,8 @@ export default function ProfileScreen() {
             <View style={s.progressHeader}>
               <Text style={s.progressLabel}>Today</Text>
               <Text style={s.progressFrac}>
-                <Text style={{ color: todayReads >= goal ? colors.success : colors.accent }}>{todayReads}</Text>
-                <Text style={{ color: colors.textMuted }}>/{goal} reads</Text>
+                <Text style={{ color: todayPages >= goal ? colors.success : colors.accent }}>{todayPages}</Text>
+                <Text style={{ color: colors.textMuted }}>/{goal} pages</Text>
               </Text>
             </View>
             <View style={s.progressTrack}>
@@ -141,9 +239,17 @@ export default function ProfileScreen() {
               </View>
             ) : (
               <Text style={s.progressHint}>
-                {goal - todayReads} more {goal - todayReads === 1 ? 'read' : 'reads'} to hit your goal
+                {goal - todayPages} more {goal - todayPages === 1 ? 'page' : 'pages'} to hit your goal
               </Text>
             )}
+          </View>
+        </View>
+
+        {/* Contribution graph */}
+        <View style={s.section}>
+          <Text style={s.sectionTitle}>Reading Activity</Text>
+          <View style={s.card}>
+            <ContributionGraph history={history} />
           </View>
         </View>
 
@@ -154,7 +260,7 @@ export default function ProfileScreen() {
             <View style={s.goalRow}>
               <View>
                 <Text style={s.goalNum}>{goal}</Text>
-                <Text style={s.goalDesc}>articles per day</Text>
+                <Text style={s.goalDesc}>pages per day</Text>
               </View>
               <View style={s.goalControls}>
                 <TouchableOpacity style={s.goalBtn} onPress={() => nudgeGoal(-1)}>
@@ -166,7 +272,7 @@ export default function ProfileScreen() {
               </View>
             </View>
             <Text style={s.goalHint}>
-              A qualifying read is 90 seconds of reading or reaching 60% of an article.
+              Pages are counted as you flip through articles in page mode.
             </Text>
           </View>
         </View>
@@ -182,8 +288,8 @@ export default function ProfileScreen() {
             </View>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="book-outline" size={24} color={colors.accent} />
-              <Text style={s.statNum}>{todayReads}</Text>
-              <Text style={s.statLabel}>Today</Text>
+              <Text style={s.statNum}>{todayPages}</Text>
+              <Text style={s.statLabel}>Pages today</Text>
             </View>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="library-outline" size={24} color={colors.success} />

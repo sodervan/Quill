@@ -72,7 +72,8 @@ export async function initDb(): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS daily_log (
       date TEXT PRIMARY KEY,
-      qualifying_reads INTEGER NOT NULL DEFAULT 0
+      qualifying_reads INTEGER NOT NULL DEFAULT 0,
+      pages_read INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS settings (
@@ -111,7 +112,17 @@ export async function initDb(): Promise<void> {
     try { await db.execAsync(`CREATE UNIQUE INDEX IF NOT EXISTS idx_highlights_dedup ON highlights(article_id, created_at)`); } catch {}
   }
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '7')`);
+  // v8: add scroll_depth to reading_progress for scroll-mode progress tracking
+  if (verNum < 8) {
+    try { await db.execAsync(`ALTER TABLE reading_progress ADD COLUMN scroll_depth REAL NOT NULL DEFAULT 0`); } catch {}
+  }
+
+  // v9: add pages_read to daily_log for page-based goal tracking
+  if (verNum < 9) {
+    try { await db.execAsync(`ALTER TABLE daily_log ADD COLUMN pages_read INTEGER NOT NULL DEFAULT 0`); } catch {}
+  }
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '9')`);
 }
 
 // --- Settings helpers ---
@@ -138,6 +149,7 @@ export async function followPublication(id: string): Promise<void> {
 export async function unfollowPublication(id: string): Promise<void> {
   const db = getDb();
   await db.runAsync(`DELETE FROM followed_publications WHERE id = ?`, [id]);
+  await db.runAsync(`DELETE FROM remote_sources WHERE id = ?`, [id]);
   import('../lib/sync').then((m) => m.syncUnfollow(id)).catch(() => {});
 }
 
@@ -201,6 +213,7 @@ export interface ProgressRow {
   article_id: string;
   pages_read: number;
   total_pages: number;
+  scroll_depth: number;
   completed: number;
   last_read_at: number;
 }
@@ -210,14 +223,34 @@ export async function getProgress(articleId: string): Promise<ProgressRow | null
   return db.getFirstAsync<ProgressRow>(`SELECT * FROM reading_progress WHERE article_id = ?`, [articleId]);
 }
 
+export async function getProgressBatch(articleIds: string[]): Promise<Map<string, number>> {
+  if (articleIds.length === 0) return new Map();
+  const db = getDb();
+  const ph = articleIds.map(() => '?').join(',');
+  const rows = await db.getAllAsync<ProgressRow>(
+    `SELECT * FROM reading_progress WHERE article_id IN (${ph})`,
+    articleIds,
+  );
+  return new Map(rows.map((r) => [
+    r.article_id,
+    Math.max(r.pages_read / r.total_pages, r.scroll_depth ?? 0),
+  ]));
+}
+
 export async function recordPageRead(articleId: string, pagesRead: number, totalPages: number): Promise<void> {
   const db = getDb();
   const now = Date.now();
   const completed = pagesRead >= totalPages ? 1 : 0;
 
+  // Compute new pages read since last record so we can add to today's daily total
+  const prev = await db.getFirstAsync<{ pages_read: number }>(
+    `SELECT pages_read FROM reading_progress WHERE article_id = ?`, [articleId],
+  );
+  const delta = Math.max(0, pagesRead - (prev?.pages_read ?? 0));
+
   await db.runAsync(
-    `INSERT INTO reading_progress (article_id, pages_read, total_pages, completed, last_read_at)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO reading_progress (article_id, pages_read, total_pages, scroll_depth, completed, last_read_at)
+     VALUES (?, ?, ?, 0, ?, ?)
      ON CONFLICT(article_id) DO UPDATE SET
        pages_read = MAX(pages_read, excluded.pages_read),
        total_pages = excluded.total_pages,
@@ -225,6 +258,40 @@ export async function recordPageRead(articleId: string, pagesRead: number, total
        last_read_at = excluded.last_read_at`,
     [articleId, pagesRead, totalPages, completed, now],
   );
+
+  if (delta > 0) {
+    const key = todayKey();
+    await db.runAsync(
+      `INSERT INTO daily_log (date, qualifying_reads, pages_read) VALUES (?, 0, ?)
+       ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + excluded.pages_read`,
+      [key, delta],
+    );
+    const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number }>(
+      `SELECT qualifying_reads, pages_read FROM daily_log WHERE date = ?`, [key],
+    );
+    if (row) {
+      import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads, row.pages_read)).catch(() => {});
+    }
+  }
+
+  import('../lib/sync').then((m) => m.syncReadingProgress(articleId)).catch(() => {});
+}
+
+export async function recordScrollProgress(articleId: string, depth: number): Promise<void> {
+  const db = getDb();
+  const now = Date.now();
+  const completed = depth >= 0.9 ? 1 : 0;
+
+  await db.runAsync(
+    `INSERT INTO reading_progress (article_id, pages_read, total_pages, scroll_depth, completed, last_read_at)
+     VALUES (?, 0, 1, ?, ?, ?)
+     ON CONFLICT(article_id) DO UPDATE SET
+       scroll_depth = MAX(scroll_depth, excluded.scroll_depth),
+       completed = MAX(completed, excluded.completed),
+       last_read_at = excluded.last_read_at`,
+    [articleId, depth, completed, now],
+  );
+  import('../lib/sync').then((m) => m.syncReadingProgress(articleId)).catch(() => {});
 }
 
 // --- Read events (PRD: 60% scroll depth OR 90s active reading = qualifying) ---
@@ -332,38 +399,68 @@ export async function getTodayReads(): Promise<number> {
   return row?.qualifying_reads ?? 0;
 }
 
-// Keep for backwards compat with StreakScreen/ProfileScreen
 export async function getTodayPages(): Promise<number> {
-  return getTodayReads();
+  const db = getDb();
+  const row = await db.getFirstAsync<{ pages_read: number }>(
+    `SELECT pages_read FROM daily_log WHERE date = ?`, [todayKey()],
+  );
+  return row?.pages_read ?? 0;
 }
 
 export async function getDailyGoal(): Promise<number> {
   const val = await getSetting('daily_goal');
-  return parseInt(val ?? '1', 10);
+  return parseInt(val ?? '5', 10);
 }
 
 export async function setDailyGoal(n: number): Promise<void> {
   await setSetting('daily_goal', String(n));
+  import('../lib/sync').then((m) => m.syncGoal(n)).catch(() => {});
+}
+
+export async function getDailyLogHistory(days: number): Promise<{ date: string; pages: number }[]> {
+  const db = getDb();
+  const rows = await db.getAllAsync<{ date: string; pages_read: number }>(
+    `SELECT date, pages_read FROM daily_log ORDER BY date ASC`,
+  );
+  const map = new Map(rows.map((r) => [r.date, r.pages_read]));
+  const result: { date: string; pages: number }[] = [];
+  const today = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    result.push({ date: key, pages: map.get(key) ?? 0 });
+  }
+  return result;
 }
 
 export async function computeStreak(): Promise<number> {
   const db = getDb();
   const goal = await getDailyGoal();
-  const rows = await db.getAllAsync<{ date: string; qualifying_reads: number }>(
-    `SELECT date, qualifying_reads FROM daily_log ORDER BY date DESC`,
+  const todayStr = todayKey();
+
+  const rows = await db.getAllAsync<{ date: string; pages_read: number; qualifying_reads: number }>(
+    `SELECT date, pages_read, qualifying_reads FROM daily_log ORDER BY date DESC`,
   );
   if (rows.length === 0) return 0;
 
-  let streak = 0;
-  let cursor = new Date(todayKey());
+  // A day counts if pages_read >= goal, or (legacy rows) qualifying_reads >= goal
+  const metDates = new Set(
+    rows
+      .filter((r) => r.pages_read >= goal || (r.pages_read === 0 && r.qualifying_reads >= goal))
+      .map((r) => r.date),
+  );
 
-  for (const row of rows) {
-    const expected = cursor.toISOString().slice(0, 10);
-    if (row.date === expected && row.qualifying_reads >= goal) {
+  // If today's goal isn't met yet, start counting from yesterday (streak still alive today)
+  const cursor = new Date(todayStr);
+  if (!metDates.has(todayStr)) cursor.setDate(cursor.getDate() - 1);
+
+  let streak = 0;
+  for (let i = 0; i < 1000; i++) {
+    const key = cursor.toISOString().slice(0, 10);
+    if (metDates.has(key)) {
       streak++;
       cursor.setDate(cursor.getDate() - 1);
-    } else if (row.date < expected) {
-      break;
     } else {
       break;
     }

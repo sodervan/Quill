@@ -14,23 +14,49 @@ export interface FeedItem {
 }
 
 export async function fetchFeed(url: string): Promise<FeedItem[]> {
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'Perch/1.0 RSS Reader' },
-  });
-  if (!res.ok) throw new Error(`Feed fetch failed: ${res.status}`);
-  const xml = await res.text();
-  return parseXml(xml);
+  const { items } = await fetchFeedPage(url);
+  return items;
 }
 
-function parseXml(xml: string): FeedItem[] {
+/** Fetches one page and returns items + the URL of the next page (if any). */
+export async function fetchFeedPage(url: string): Promise<{ items: FeedItem[]; nextUrl: string | null }> {
+  const res = await fetch(url, { headers: { 'User-Agent': 'Perch/1.0 RSS Reader' } });
+  if (!res.ok) throw new Error(`Feed fetch failed: ${res.status}`);
+  const xml = await res.text();
+  return parseXmlWithPagination(xml, url);
+}
+
+function extractNextUrl(xml: string, root: ReturnType<typeof parse>, baseUrl: string): string | null {
+  // 1. CSS query for <link rel="next"> (Atom) and <atom:link rel="next"> (RSS+Atom ns)
+  for (const el of root.querySelectorAll('link')) {
+    if (el.getAttribute('rel') === 'next') {
+      const href = el.getAttribute('href') ?? el.text?.trim();
+      if (href) return resolveUrl(href, baseUrl);
+    }
+  }
+  // 2. Regex fallback for namespace-prefixed <atom:link rel="next"> that CSS may miss
+  const m = xml.match(/<[a-z]+:link[^>]+rel=["']next["'][^>]*>/i)
+    ?? xml.match(/<[a-z]+:link[^>]+>[^<]*<\/[a-z]+:link>/i);
+  if (m) {
+    const hm = m[0].match(/href=["']([^"']+)["']/);
+    if (hm?.[1]) return resolveUrl(hm[1], baseUrl);
+  }
+  return null;
+}
+
+function resolveUrl(href: string, base: string): string {
+  if (href.startsWith('http')) return href;
+  try { return new URL(href, base).href; } catch { return href; }
+}
+
+function parseXmlWithPagination(xml: string, baseUrl: string): { items: FeedItem[]; nextUrl: string | null } {
   const root = parse(xml, XML_PARSE_OPTS);
-  // RSS 2.0 — use 'item' not 'channel > item' (direct-child selector is unreliable on XML)
+  const nextUrl = extractNextUrl(xml, root, baseUrl);
   const rssItems = root.querySelectorAll('item');
-  if (rssItems.length > 0) return rssItems.map(parseRssItem);
-  // Atom
+  if (rssItems.length > 0) return { items: rssItems.map(parseRssItem), nextUrl };
   const atomEntries = root.querySelectorAll('entry');
-  if (atomEntries.length > 0) return atomEntries.map(parseAtomEntry);
-  return [];
+  if (atomEntries.length > 0) return { items: atomEntries.map(parseAtomEntry), nextUrl };
+  return { items: [], nextUrl };
 }
 
 function parseRssItem(el: ReturnType<typeof parse>): FeedItem {
