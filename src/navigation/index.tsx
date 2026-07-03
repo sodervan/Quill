@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, DeviceEventEmitter, View } from 'react-native';
+import { ActivityIndicator, DeviceEventEmitter, Text, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -80,37 +80,30 @@ export default function Navigation() {
 
   useEffect(() => {
     async function init() {
-      // Check Supabase session
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
-        // Not signed in — check if they skipped auth
         const skipped = await getSetting('auth_skipped');
-        if (skipped !== '1') {
-          setStage('auth');
-          return;
-        }
+        if (skipped !== '1') { setStage('auth'); return; }
       } else {
-        // Upload any pre-login local data first, then restore cloud-only data
-        import('../lib/sync').then(async (m) => {
+        // Already signed in (app restart) — await restore so FeedScreen sees all follows
+        try {
+          const m = await import('../lib/sync');
           await m.uploadLocalToSupabase();
           await m.restoreFromSupabase();
-        }).catch(() => {});
+        } catch {}
       }
-      // Check onboarding
       const onboarded = await getSetting('onboarding_done');
       setStage(onboarded === '1' ? 'app' : 'onboarding');
     }
     void init();
 
-    // Listen for manual "sign in" requests from ProfileScreen
     const authRequestSub = DeviceEventEmitter.addListener('navigateToAuth', () => setStage('auth'));
 
-    // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session) {
         if (_event === 'SIGNED_IN') {
-          // Await full restore before checking onboarding_done — restore may set it to '1'
-          // for existing users, and also ensures followed pubs are in SQLite before FeedScreen loads.
+          // Show spinner immediately, await restore, then navigate — no onboarding flash
+          setStage('loading');
           import('../lib/sync').then(async (m) => {
             await m.uploadLocalToSupabase();
             await m.restoreFromSupabase();
@@ -121,7 +114,6 @@ export default function Navigation() {
             setStage(val === '1' ? 'app' : 'onboarding');
           });
         } else {
-          // TOKEN_REFRESHED etc — just sync state without blocking
           getSetting('onboarding_done').then((val) => {
             setStage(val === '1' ? 'app' : 'onboarding');
           });
@@ -135,8 +127,9 @@ export default function Navigation() {
 
   if (stage === 'loading') {
     return (
-      <View style={{ flex: 1, backgroundColor: colors.bgDeep, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ flex: 1, backgroundColor: colors.bgDeep, alignItems: 'center', justifyContent: 'center', gap: 16 }}>
         <ActivityIndicator color={colors.accent} size="large" />
+        <Text style={{ color: colors.textMuted, fontSize: 14, letterSpacing: 0.3 }}>Syncing your data…</Text>
       </View>
     );
   }
@@ -148,10 +141,11 @@ export default function Navigation() {
           if (skipped) {
             const { setSetting } = await import('../data/db');
             await setSetting('auth_skipped', '1');
+            const { getSetting: gs } = await import('../data/db');
+            const onboarded = await gs('onboarding_done');
+            setStage(onboarded === '1' ? 'app' : 'onboarding');
           }
-          const { getSetting: gs } = await import('../data/db');
-          const onboarded = await gs('onboarding_done');
-          setStage(onboarded === '1' ? 'app' : 'onboarding');
+          // Signed in: onAuthStateChange fires and handles restore + navigation
         }}
       />
     );
