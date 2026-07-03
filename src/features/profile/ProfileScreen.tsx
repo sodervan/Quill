@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   StatusBar, Switch, Alert, DeviceEventEmitter,
@@ -7,12 +7,15 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import { signOut } from 'firebase/auth';
 import {
   computeStreak, getTodayPages, getDailyGoal, setDailyGoal,
   getFollowedIds, setSetting, getDailyLogHistory,
 } from '../../data/db';
-import { supabase } from '../../lib/supabase';
-import { colors, type as T, space, radius, shadow } from '../../theme';
+import { auth } from '../../lib/firebase';
+import { type as T, space, radius, shadow } from '../../theme';
+import { useColors } from '../../theme/ThemeContext';
+import { useTheme } from '../../theme/ThemeContext';
 import { RootStackParamList } from '../../navigation';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
@@ -23,8 +26,8 @@ const GAP = 2;
 const STEP = CELL + GAP;
 const WEEKS = 16;
 
-function cellColor(pages: number): string {
-  if (pages === 0) return '#1E2D45';
+function cellColor(pages: number, isDark: boolean): string {
+  if (pages === 0) return isDark ? '#1E2D45' : '#E5E7EB';
   if (pages <= 2) return '#0d3d1f';
   if (pages <= 5) return '#14532d';
   if (pages <= 9) return '#166534';
@@ -33,17 +36,18 @@ function cellColor(pages: number): string {
 }
 
 function ContributionGraph({ history }: { history: { date: string; pages: number }[] }) {
-  const today = new Date();
-  const todayDow = today.getDay(); // 0=Sun
+  const colors = useColors();
+  const { isDark } = useTheme();
+  const cg = useMemo(() => createCgStyles(colors), [colors]);
 
-  // Align to the Sunday that starts the oldest week
+  const today = new Date();
+  const todayDow = today.getDay();
   const startSunday = new Date(today);
   startSunday.setDate(today.getDate() - todayDow - (WEEKS - 1) * 7);
   startSunday.setHours(0, 0, 0, 0);
 
   const dataMap = new Map(history.map((h) => [h.date, h.pages]));
 
-  // Build grid: grid[week][dayOfWeek]
   const grid: { date: string; pages: number; isFuture: boolean }[][] = [];
   for (let w = 0; w < WEEKS; w++) {
     const week: { date: string; pages: number; isFuture: boolean }[] = [];
@@ -56,7 +60,6 @@ function ContributionGraph({ history }: { history: { date: string; pages: number
     grid.push(week);
   }
 
-  // Month label for first col of each new month
   const monthLabels: (string | null)[] = grid.map((week) => {
     const firstDay = new Date(week[0].date);
     return firstDay.getDate() <= 7 ? MONTHS[firstDay.getMonth()] : null;
@@ -64,7 +67,6 @@ function ContributionGraph({ history }: { history: { date: string; pages: number
 
   return (
     <View>
-      {/* Month row */}
       <View style={{ flexDirection: 'row', marginBottom: 3 }}>
         {grid.map((_, w) => (
           <View key={w} style={{ width: STEP }}>
@@ -74,8 +76,6 @@ function ContributionGraph({ history }: { history: { date: string; pages: number
           </View>
         ))}
       </View>
-
-      {/* Cells */}
       <View style={{ flexDirection: 'row', gap: GAP }}>
         {grid.map((week, w) => (
           <View key={w} style={{ gap: GAP }}>
@@ -84,19 +84,17 @@ function ContributionGraph({ history }: { history: { date: string; pages: number
                 key={d}
                 style={[
                   cg.cell,
-                  { backgroundColor: cell.isFuture ? 'transparent' : cellColor(cell.pages) },
+                  { backgroundColor: cell.isFuture ? 'transparent' : cellColor(cell.pages, isDark) },
                 ]}
               />
             ))}
           </View>
         ))}
       </View>
-
-      {/* Legend */}
       <View style={cg.legendRow}>
         <Text style={cg.legendText}>Less</Text>
         {[0, 3, 6, 10, 15].map((n) => (
-          <View key={n} style={[cg.cell, { backgroundColor: cellColor(n) }]} />
+          <View key={n} style={[cg.cell, { backgroundColor: cellColor(n, isDark) }]} />
         ))}
         <Text style={cg.legendText}>More</Text>
       </View>
@@ -104,36 +102,37 @@ function ContributionGraph({ history }: { history: { date: string; pages: number
   );
 }
 
-const cg = StyleSheet.create({
+function createCgStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   cell: { width: CELL, height: CELL, borderRadius: 2 },
   monthLabel: { fontSize: 8, color: colors.textMuted, lineHeight: 10 },
   legendRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 8, justifyContent: 'flex-end' },
   legendText: { fontSize: 9, color: colors.textMuted },
-});
+}); }
 
 export default function ProfileScreen() {
+  const colors = useColors();
+  const { isDark, toggleTheme } = useTheme();
+  const s = useMemo(() => createProfileStyles(colors), [colors]);
   const nav = useNavigation<Nav>();
   const [streak, setStreak] = useState(0);
   const [todayPages, setTodayPages] = useState(0);
   const [goal, setGoal] = useState(5);
   const [followedCount, setFollowedCount] = useState(0);
-  const [darkMode] = useState(true);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [history, setHistory] = useState<{ date: string; pages: number }[]>([]);
+
+  const userEmail = auth.currentUser?.email ?? null;
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
       (async () => {
-        const [s, p, g, f, hist] = await Promise.all([
+        const [str, p, g, f, hist] = await Promise.all([
           computeStreak(), getTodayPages(), getDailyGoal(), getFollowedIds(),
           getDailyLogHistory(WEEKS * 7),
         ]);
-        const { data: { session } } = await supabase.auth.getSession();
         if (active) {
-          setStreak(s); setTodayPages(p); setGoal(g); setFollowedCount(f.length);
+          setStreak(str); setTodayPages(p); setGoal(g); setFollowedCount(f.length);
           setHistory(hist);
-          setUserEmail(session?.user?.email ?? null);
         }
       })();
       return () => { active = false; };
@@ -145,7 +144,7 @@ export default function ProfileScreen() {
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Sign out', style: 'destructive', onPress: async () => {
-          await supabase.auth.signOut();
+          await signOut(auth);
           await setSetting('auth_skipped', '0');
         },
       },
@@ -161,9 +160,21 @@ export default function ProfileScreen() {
   const progress = Math.min(1, todayPages / goal);
   const progressPct = Math.round(progress * 100);
 
+  function SettingRow({ icon, label, right }: { icon: string; label: string; right: React.ReactNode }) {
+    return (
+      <View style={s.srRow}>
+        <View style={s.srIconWrap}>
+          <Ionicons name={icon as any} size={18} color={colors.textSecondary} />
+        </View>
+        <Text style={s.srLabel}>{label}</Text>
+        <View style={s.srRight}>{right}</View>
+      </View>
+    );
+  }
+
   return (
     <View style={s.root}>
-      <StatusBar barStyle="light-content" backgroundColor={colors.bgDeep} />
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bgDeep} />
       <LinearGradient colors={[colors.bgDeep, colors.bg]} style={StyleSheet.absoluteFill} />
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.scroll}>
@@ -216,7 +227,6 @@ export default function ProfileScreen() {
             </View>
           </View>
 
-          {/* Today's progress */}
           <View style={s.progressSection}>
             <View style={s.progressHeader}>
               <Text style={s.progressLabel}>Today</Text>
@@ -271,9 +281,7 @@ export default function ProfileScreen() {
                 </TouchableOpacity>
               </View>
             </View>
-            <Text style={s.goalHint}>
-              Pages are counted as you flip through articles in page mode.
-            </Text>
+            <Text style={s.goalHint}>Pages are counted as you flip through articles in page mode.</Text>
           </View>
         </View>
 
@@ -307,7 +315,18 @@ export default function ProfileScreen() {
               <SettingRow icon="color-wand-outline" label="My Highlights" right={<Ionicons name="chevron-forward" size={16} color={colors.textMuted} />} />
             </TouchableOpacity>
             <View style={s.divider} />
-            <SettingRow icon="moon-outline" label="Dark mode" right={<Switch value={darkMode} onValueChange={() => {}} thumbColor={colors.accent} trackColor={{ true: colors.accentMuted, false: colors.surfaceHigher }} />} />
+            <SettingRow
+              icon="moon-outline"
+              label="Dark mode"
+              right={
+                <Switch
+                  value={isDark}
+                  onValueChange={toggleTheme}
+                  thumbColor={colors.accent}
+                  trackColor={{ true: colors.accentMuted, false: colors.surfaceHigher }}
+                />
+              }
+            />
             <View style={s.divider} />
             <SettingRow icon="notifications-outline" label="Daily reminder" right={<Text style={s.settingVal}>8:00 AM</Text>} />
             <View style={s.divider} />
@@ -331,26 +350,7 @@ export default function ProfileScreen() {
   );
 }
 
-function SettingRow({ icon, label, right }: { icon: string; label: string; right: React.ReactNode }) {
-  return (
-    <View style={sr.row}>
-      <View style={sr.iconWrap}>
-        <Ionicons name={icon as any} size={18} color={colors.textSecondary} />
-      </View>
-      <Text style={sr.label}>{label}</Text>
-      <View style={sr.right}>{right}</View>
-    </View>
-  );
-}
-
-const sr = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12 },
-  iconWrap: { width: 32 },
-  label: { ...T.body, color: colors.text, flex: 1 },
-  right: { alignItems: 'flex-end' },
-});
-
-const s = StyleSheet.create({
+function createProfileStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
   scroll: { paddingTop: 60 },
   header: { alignItems: 'center', paddingBottom: space.xl, paddingHorizontal: space.lg },
@@ -415,4 +415,8 @@ const s = StyleSheet.create({
   statLabel: { ...T.caption, color: colors.textMuted },
   divider: { height: 1, backgroundColor: colors.border },
   settingVal: { ...T.caption, color: colors.textMuted },
-});
+  srRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12 },
+  srIconWrap: { width: 32 },
+  srLabel: { ...T.body, color: colors.text, flex: 1 },
+  srRight: { alignItems: 'flex-end' },
+}); }

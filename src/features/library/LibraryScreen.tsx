@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   StatusBar, ActivityIndicator,
@@ -7,16 +7,20 @@ import { useFocusEffect } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { getSavedArticles, unsaveArticle, type ArticleRow, getRemoteMetaSync, getAllRemoteSources } from '../../data/db';
+import { getSavedArticles, unsaveArticle, type ArticleRow, getRemoteMetaSync, getAllRemoteSources, getProgressBatch } from '../../data/db';
 import { PUBLICATIONS } from '../../data/publications';
-import { colors, type as T, space, radius } from '../../theme';
+import { type as T, space, radius } from '../../theme';
+import { useColors } from '../../theme/ThemeContext';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
 
 type Props = { navigation: NativeStackNavigationProp<any> };
 
 export default function LibraryScreen({ navigation }: Props) {
+  const colors = useColors();
+  const s = useMemo(() => createLibraryStyles(colors), [colors]);
   const [saved, setSaved] = useState<ArticleRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [progressMap, setProgressMap] = useState<Map<string, number>>(new Map());
 
   useFocusEffect(
     useCallback(() => {
@@ -24,7 +28,8 @@ export default function LibraryScreen({ navigation }: Props) {
       (async () => {
         await getAllRemoteSources(); // populate remote meta cache
         const rows = await getSavedArticles();
-        if (active) { setSaved(rows); setLoading(false); }
+        const prog = await getProgressBatch(rows.map((a) => a.id));
+        if (active) { setSaved(rows); setProgressMap(prog); setLoading(false); }
       })();
       return () => { active = false; };
     }, []),
@@ -102,6 +107,7 @@ export default function LibraryScreen({ navigation }: Props) {
           renderItem={({ item }) => {
             const pi = pubInfo(item);
             const c = pi.color;
+            const prog = progressMap.get(item.id) ?? 0;
             return (
               <TouchableOpacity
                 style={s.card}
@@ -152,6 +158,11 @@ export default function LibraryScreen({ navigation }: Props) {
                     </View>
                   </View>
                 </View>
+                {prog > 0.02 && (
+                  <View style={s.progressTrack}>
+                    <View style={[s.progressFill, { width: `${Math.round(prog * 100)}%` as any, backgroundColor: c }]} />
+                  </View>
+                )}
               </TouchableOpacity>
             );
           }}
@@ -161,7 +172,7 @@ export default function LibraryScreen({ navigation }: Props) {
   );
 }
 
-const s = StyleSheet.create({
+function createLibraryStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
   header: {
     flexDirection: 'row', alignItems: 'center',
@@ -205,4 +216,6 @@ const s = StyleSheet.create({
   },
   metaText: { ...T.caption, color: colors.textMuted },
   unsaveBtn: { padding: 4 },
-});
+  progressTrack: { height: 3, backgroundColor: colors.surfaceHigher },
+  progressFill: { height: 3 },
+}); }

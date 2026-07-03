@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Animated, Dimensions, FlatList, Image, Linking, Modal,
   NativeScrollEvent, NativeSyntheticEvent, PanResponder, RefreshControl,
@@ -13,7 +13,8 @@ import { format } from 'date-fns';
 import * as Haptics from 'expo-haptics';
 
 import { RootStackParamList } from '../../navigation';
-import { colors, type as T, space, radius, shadow } from '../../theme';
+import { type as T, space, radius, shadow } from '../../theme';
+import { useColors } from '../../theme/ThemeContext';
 import { PUBLICATIONS } from '../../data/publications';
 import { fetchFeed, fetchFeedPage, FeedItem } from '../../data/rss';
 import { scrapeForArticles, deriveBlogUrl } from '../../data/scraper';
@@ -66,6 +67,10 @@ function smartAge(ts: number): string {
   return format(new Date(ts), 'MMM d');
 }
 
+function stripCdata(s: string): string {
+  return s.replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+}
+
 function stripHtml(html: string): string {
   return html
     .replace(/<[^>]*>/g, ' ')
@@ -74,13 +79,38 @@ function stripHtml(html: string): string {
     .replace(/\s+/g, ' ').trim();
 }
 
-function interleave(articles: ArticleRow[]): ArticleRow[] {
+function dailySeed(): number {
+  const d = new Date();
+  return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+}
+
+function seededRng(seed: number) {
+  let s = seed | 0;
+  return () => {
+    s = Math.imul(s ^ (s >>> 15), s | 1);
+    s ^= s + Math.imul(s ^ (s >>> 7), s | 61);
+    return ((s ^ (s >>> 14)) >>> 0) / 0x100000000;
+  };
+}
+
+function seededShuffle<T>(arr: T[], seed: number): T[] {
+  const rng = seededRng(seed);
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function interleave(articles: ArticleRow[], seed?: number): ArticleRow[] {
   const byPub = new Map<string, ArticleRow[]>();
   for (const a of articles) {
     if (!byPub.has(a.publication_id)) byPub.set(a.publication_id, []);
     byPub.get(a.publication_id)!.push(a);
   }
-  const queues = [...byPub.values()];
+  const rawQueues = [...byPub.values()];
+  const queues = seed !== undefined ? seededShuffle(rawQueues, seed) : rawQueues;
   const result: ArticleRow[] = [];
   let i = 0;
   while (queues.some((q) => q.length > 0)) {
@@ -125,6 +155,8 @@ function SwipeableCard({
   onSwipeRight?: () => void;
   onSwipeLeft?: () => void;
 }) {
+  const colors = useColors();
+  const s = useMemo(() => createFeedStyles(colors), [colors]);
   const translateX = useRef(new Animated.Value(0)).current;
   const hapticFired = useRef(false);
 
@@ -194,6 +226,8 @@ function HeroCardInner({
   isSaved?: boolean;
   progress: number;
 }) {
+  const colors = useColors();
+  const s = useMemo(() => createFeedStyles(colors), [colors]);
   const pub = PUBLICATIONS.find((p) => p.id === article.publication_id);
   const remoteMeta = pub ? null : getRemoteMetaSync(article.publication_id);
   const c = pub?.color ?? remoteMeta?.color ?? colors.accent;
@@ -275,6 +309,8 @@ function ArticleCardInner({
   isSaved?: boolean;
   progress: number;
 }) {
+  const colors = useColors();
+  const s = useMemo(() => createFeedStyles(colors), [colors]);
   const pub = PUBLICATIONS.find((p) => p.id === article.publication_id);
   const remoteMeta = pub ? null : getRemoteMetaSync(article.publication_id);
   const c = pub?.color ?? remoteMeta?.color ?? colors.accent;
@@ -359,6 +395,8 @@ function ActionSheet({
   onClose: () => void;
   onAction: (action: string) => void;
 }) {
+  const colors = useColors();
+  const s = useMemo(() => createFeedStyles(colors), [colors]);
   if (!mounted) return null;
 
   const rows = [
@@ -408,6 +446,8 @@ function ActionSheet({
 // ─── FeedScreen ───────────────────────────────────────────────────────────────
 
 export default function FeedScreen() {
+  const colors = useColors();
+  const s = useMemo(() => createFeedStyles(colors), [colors]);
   const nav = useNavigation<Nav>();
   const flatListRef = useRef<FlatList>(null);
 
@@ -455,6 +495,17 @@ export default function FeedScreen() {
   // Tracks whether the first load has completed so focus-return calls don't re-randomize
   const hasLoadedRef = useRef(false);
 
+  // Tracks all seen article IDs so background refresh can diff for new posts
+  const knownIdsRef = useRef<Set<string>>(new Set());
+
+  // Hide-read toggle
+  const [hideRead, setHideRead] = useState(false);
+
+  // Background refresh: pending new articles + pill count
+  const [newPostCount, setNewPostCount] = useState(0);
+  const [pendingNewArticles, setPendingNewArticles] = useState<ArticleRow[]>([]);
+  const bgRefreshRef = useRef<() => Promise<void>>(async () => {});
+
   // Action sheet — animations live here so they survive open/close cycles
   const sheetAnimY = useRef(new Animated.Value(500)).current;
   const sheetAnimBg = useRef(new Animated.Value(0)).current;
@@ -473,9 +524,10 @@ export default function FeedScreen() {
 
   const applyFilter = useCallback((articles: ArticleRow[], filter: string | null, isShuffle = false) => {
     const base = filter ? articles.filter((a) => a.publication_id === filter) : articles;
+    const seed = dailySeed();
     const ordered = isShuffle
-      ? [...base].sort(() => Math.random() - 0.5)
-      : interleave(base);
+      ? seededShuffle(base, seed)
+      : interleave(base, seed);
     setDisplayed(ordered.filter((a) => !hiddenRef.current.has(a.id)));
   // hiddenRef is a mutable ref — intentionally not in deps so applyFilter stays stable
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -486,6 +538,33 @@ export default function FeedScreen() {
     setShuffled(next);
     shuffledRef.current = next;
     applyFilter(allArticles, activeFilter, next);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }
+
+  function toggleHideRead() {
+    setHideRead((prev) => !prev);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }
+
+  function acceptNewPosts() {
+    const newArticles = pendingNewArticles;
+    const toAdd = newArticles.filter(
+      (a) => !hiddenRef.current.has(a.id) && (!activeFilter || activeFilter === a.publication_id),
+    );
+    setAllArticles((prev) => {
+      const existing = new Set(prev.map((a) => a.id));
+      const fresh = newArticles.filter((a) => !existing.has(a.id));
+      return fresh.length ? [...fresh, ...prev] : prev;
+    });
+    setDisplayed((prev) => {
+      const existing = new Set(prev.map((a) => a.id));
+      const fresh = toAdd.filter((a) => !existing.has(a.id));
+      return fresh.length ? [...fresh, ...prev] : prev;
+    });
+    newArticles.forEach((a) => knownIdsRef.current.add(a.id));
+    setPendingNewArticles([]);
+    setNewPostCount(0);
+    flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   }
 
@@ -540,6 +619,7 @@ export default function FeedScreen() {
     ]);
     setSavedIds(saved);
     setAllArticles(rows);
+    rows.forEach((a) => knownIdsRef.current.add(a.id));
     // First load, pull-to-refresh, or forced reapply (e.g. after unfollow): re-order.
     // Focus-return: keep existing order so shuffle/filter state is preserved.
     if (!hasLoadedRef.current || fromNetwork || forceReapply) {
@@ -563,6 +643,40 @@ export default function FeedScreen() {
     void getProgressBatch(displayed.map((a) => a.id)).then(setProgressMap);
   }, [displayed]);
   useEffect(() => { void loadArticles(true); }, []);
+
+  // Keep bgRefreshRef in sync with latest state so the stable interval can call it
+  useEffect(() => {
+    bgRefreshRef.current = async () => {
+      if (feedTab !== 'following') return;
+      try {
+        const ids = await getFollowedIds();
+        if (ids.length === 0) return;
+        const remoteSrcList = await getAllRemoteSources().catch(() => []);
+        const remoteById = new Map(remoteSrcList.map((r) => [r.id, r]));
+        await Promise.allSettled(ids.map(async (pubId) => {
+          const pub = PUBLICATIONS.find((p) => p.id === pubId);
+          const remote = remoteById.get(pubId);
+          const feedUrl = pub?.feedUrl ?? (remote as any)?.feed_url;
+          if (!feedUrl) return;
+          try {
+            const { items } = await fetchFeedPage(feedUrl);
+            await upsertArticles(items.map((item) => feedItemToRow(item, pubId)));
+          } catch {}
+        }));
+        const fresh = await getArticlesForPublications(ids);
+        const newOnes = fresh.filter((a) => !knownIdsRef.current.has(a.id));
+        if (newOnes.length > 0) {
+          setPendingNewArticles(newOnes);
+          setNewPostCount(newOnes.length);
+        }
+      } catch {}
+    };
+  }, [feedTab]);
+
+  useEffect(() => {
+    const id = setInterval(() => { void bgRefreshRef.current(); }, 10 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const loadExploreArticles = useCallback(async () => {
     if (exploreArticles.length > 0) return;
@@ -824,6 +938,18 @@ export default function FeedScreen() {
 
   const tabIndicatorX = tabAnim.interpolate({ inputRange: [0, 1], outputRange: [0, HALF_W] });
 
+  const inProgressArticles = useMemo(() =>
+    allArticles.filter((a) => {
+      const p = progressMap.get(a.id) ?? 0;
+      return p > 0.02 && p < 0.95;
+    }).slice(0, 8),
+  [allArticles, progressMap]);
+
+  const visibleArticles = useMemo(() => {
+    if (!hideRead) return displayed;
+    return displayed.filter((a) => (progressMap.get(a.id) ?? 0) < 1);
+  }, [displayed, hideRead, progressMap]);
+
   const renderItem = useCallback(({ item, index }: { item: ArticleRow; index: number }) => {
     const isExplore = feedTab === 'explore';
     const pubIsFollowed = isExplore
@@ -873,7 +999,7 @@ export default function FeedScreen() {
     if (rm) return { id, name: rm.name, emoji: '📰' as string, color: rm.color, feedUrl: rm.feedUrl };
     return null;
   }).filter(Boolean) as Array<{ id: string; name: string; emoji: string; color: string; feedUrl: string }>;
-  const activeData = feedTab === 'following' ? displayed : exploreArticles;
+  const activeData = feedTab === 'following' ? visibleArticles : exploreArticles;
 
   return (
     <View style={s.root}>
@@ -889,13 +1015,22 @@ export default function FeedScreen() {
           </View>
           <View style={s.headerRight}>
             {feedTab === 'following' && (
-              <TouchableOpacity
-                onPress={toggleShuffle}
-                style={[s.shuffleBtn, shuffled && s.shuffleBtnActive]}
-                hitSlop={8}
-              >
-                <Ionicons name="shuffle" size={18} color={shuffled ? colors.accent : colors.textMuted} />
-              </TouchableOpacity>
+              <>
+                <TouchableOpacity
+                  onPress={toggleHideRead}
+                  style={[s.shuffleBtn, hideRead && s.shuffleBtnActive]}
+                  hitSlop={8}
+                >
+                  <Ionicons name={hideRead ? 'eye-off' : 'eye-outline'} size={18} color={hideRead ? colors.accent : colors.textMuted} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={toggleShuffle}
+                  style={[s.shuffleBtn, shuffled && s.shuffleBtnActive]}
+                  hitSlop={8}
+                >
+                  <Ionicons name="shuffle" size={18} color={shuffled ? colors.accent : colors.textMuted} />
+                </TouchableOpacity>
+              </>
             )}
             <View style={s.countBadge}>
               <Text style={s.countText}>{activeData.length}</Text>
@@ -958,6 +1093,15 @@ export default function FeedScreen() {
             <Text style={s.emptySub}>Go to Discover and follow some publications</Text>
           </View>
         ) : (
+          <View style={{ flex: 1 }}>
+            {newPostCount > 0 && feedTab === 'following' && (
+              <View style={s.newPostsPillRow} pointerEvents="box-none">
+                <TouchableOpacity style={s.newPostsPill} onPress={acceptNewPosts} activeOpacity={0.85}>
+                  <Ionicons name="arrow-up" size={14} color={colors.bg} />
+                  <Text style={s.newPostsPillText}>{newPostCount} new post{newPostCount !== 1 ? 's' : ''}</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           <FlatList
             ref={flatListRef}
             data={activeData}
@@ -971,6 +1115,34 @@ export default function FeedScreen() {
             updateCellsBatchingPeriod={50}
             windowSize={10}
             initialNumToRender={10}
+            ListHeaderComponent={feedTab === 'following' && inProgressArticles.length > 0 ? (
+              <View style={s.continueStrip}>
+                <Text style={s.continueTitle}>Continue reading</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.continueRow}>
+                  {inProgressArticles.map((a) => {
+                    const pub = PUBLICATIONS.find((p) => p.id === a.publication_id);
+                    const rm = pub ? null : getRemoteMetaSync(a.publication_id);
+                    const c = pub?.color ?? rm?.color ?? colors.accent;
+                    const pubName = pub?.name ?? rm?.name ?? 'Source';
+                    const prog = progressMap.get(a.id) ?? 0;
+                    return (
+                      <TouchableOpacity key={a.id} style={s.continueCard} onPress={() => openArticle(a)} activeOpacity={0.8}>
+                        <View style={s.continueCardBody}>
+                          <View style={s.continuePubRow}>
+                            <FaviconIcon feedUrl={a.link} emoji={pub?.emoji ?? '📰'} size={12} />
+                            <Text style={[s.continuePubName, { color: c }]} numberOfLines={1}>{pubName}</Text>
+                          </View>
+                          <Text style={s.continueCardTitle} numberOfLines={2}>{stripCdata(a.title)}</Text>
+                        </View>
+                        <View style={s.continueProgressTrack}>
+                          <View style={[s.continueProgressFill, { width: `${Math.round(prog * 100)}%` as any, backgroundColor: c }]} />
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            ) : null}
             refreshControl={
               feedTab === 'following'
                 ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} />
@@ -1022,6 +1194,7 @@ export default function FeedScreen() {
               </View>
             }
           />
+          </View>
         )}
       </SafeAreaView>
 
@@ -1099,7 +1272,7 @@ export default function FeedScreen() {
   );
 }
 
-const s = StyleSheet.create({
+function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: space.md },
   loadingText: { ...T.body, color: colors.textMuted },
@@ -1311,4 +1484,34 @@ const s = StyleSheet.create({
     backgroundColor: '#475569',
   },
   hideModalConfirmText: { ...T.body, color: 'white', fontWeight: '700' },
-});
+
+  // New posts pill
+  newPostsPillRow: {
+    position: 'absolute', top: 8, left: 0, right: 0, zIndex: 10,
+    alignItems: 'center',
+  },
+  newPostsPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: colors.accent, borderRadius: radius.full,
+    paddingHorizontal: 14, paddingVertical: 8,
+    shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 3 },
+    elevation: 8,
+  },
+  newPostsPillText: { ...T.badge, color: colors.bg },
+
+  // Continue reading strip
+  continueStrip: { paddingTop: space.sm, marginBottom: 22, marginHorizontal: -space.md },
+  continueTitle: { ...T.label, color: colors.textMuted, paddingHorizontal: space.md, marginBottom: space.sm },
+  continueRow: { paddingHorizontal: space.md, gap: 10, paddingBottom: space.sm },
+  continueCard: {
+    width: 138, backgroundColor: colors.surface,
+    borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
+    overflow: 'hidden',
+  },
+  continueCardBody: { padding: 9, paddingBottom: 8 },
+  continuePubRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 5 },
+  continuePubName: { fontSize: 10, fontWeight: '700' as const, flexShrink: 1 },
+  continueCardTitle: { fontSize: 12, fontWeight: '600' as const, color: colors.text, lineHeight: 17 },
+  continueProgressTrack: { height: 3, backgroundColor: colors.surfaceHigher },
+  continueProgressFill: { height: 3 },
+}); }

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, Dimensions, ScrollView, StatusBar,
   StyleSheet, Text, TouchableOpacity, View,
@@ -12,7 +12,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { format } from 'date-fns';
 
 import { RootStackParamList } from '../../navigation';
-import { colors, type as T, space, radius } from '../../theme';
+import { type as T, space, radius } from '../../theme';
+import { useColors, useTheme } from '../../theme/ThemeContext';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
 import { PUBLICATIONS } from '../../data/publications';
 import {
@@ -30,6 +31,9 @@ const READER_FONT = 18;
 const READER_LINE = 30;
 
 export default function ReaderScreen({ route, navigation }: Props) {
+  const colors = useColors();
+  const { isDark } = useTheme();
+  const s = useMemo(() => createReaderStyles(colors), [colors]);
   const { articleId, publicationId } = route.params;
 
   const [title, setTitle] = useState('');
@@ -109,6 +113,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
         article.title,
         !!article.content_html,
         existingHighlights,
+        isDark,
       ));
       setLoading(false);
     }
@@ -201,7 +206,8 @@ export default function ReaderScreen({ route, navigation }: Props) {
     const depth = parseFloat(raw);
     if (!isNaN(depth)) {
       scrollDepthRef.current = depth;
-      scrollModeDepthRef.current = depth;
+      // High-water mark: only advance saved position, never regress
+      if (depth > scrollModeDepthRef.current) scrollModeDepthRef.current = depth;
       setScrollProgress(depth);
     }
   }
@@ -214,7 +220,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
   if (loading) {
     return (
       <View style={[s.root, s.centered]}>
-        <StatusBar barStyle="light-content" />
+        <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
         <ActivityIndicator size="large" color={colors.accent} />
         <Text style={s.loadingText}>Loading article…</Text>
       </View>
@@ -223,7 +229,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
 
   return (
     <View style={s.root}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
       <LinearGradient colors={[colors.bgDeep, colors.bg]} style={StyleSheet.absoluteFill} />
 
       <SafeAreaView style={{ flex: 1 }} edges={['top']}>
@@ -419,6 +425,19 @@ export default function ReaderScreen({ route, navigation }: Props) {
           </View>
         )}
       </SafeAreaView>
+
+      {/* ── Scroll-to-top FAB (scroll mode only, appears after scrolling down) ── */}
+      {scrollMode === 'scroll' && !useWebView && scrollProgress > 0.08 && (
+        <TouchableOpacity
+          style={s.scrollTopBtn}
+          onPress={() => {
+            webViewRef.current?.injectJavaScript("window.scrollTo({top:0,behavior:'smooth'});true;");
+          }}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="arrow-up" size={20} color={colors.bg} />
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -542,37 +561,53 @@ function applyHighlightsToHtml(html: string, highlights: HighlightRow[]): string
   return result;
 }
 
-function buildStyledHtml(content: string, title: string, isHtml = false, highlights: HighlightRow[] = []): string {
+function buildStyledHtml(content: string, title: string, isHtml = false, highlights: HighlightRow[] = [], isDark = true): string {
+  const bg       = isDark ? '#090C15' : '#F5F4F0';
+  const text     = isDark ? '#EDE8E0' : '#1C1A17';
+  const textSec  = isDark ? '#8E96A9' : '#5C5750';
+  const textMut  = isDark ? '#505869' : '#9A9590';
+  const accent   = isDark ? '#C8AA6E' : '#A67C3D';
+  const surface  = isDark ? '#0E1525' : '#FFFFFF';
+  const surfHigh = isDark ? '#131C2E' : '#F0EEE9';
+  const divider  = isDark ? '#1A2540' : 'rgba(0,0,0,0.09)';
+  const success  = isDark ? '#34D399' : '#16A34A';
+
   const rawBody = isHtml ? content : content.split('\n\n').map((p) => `<p>${p}</p>`).join('');
   const body = highlights.length > 0 ? applyHighlightsToHtml(rawBody, highlights) : rawBody;
   return `<!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #090C15; color: #EDE8E0; font-family: -apple-system, system-ui, sans-serif;
+  body { background: ${bg}; color: ${text}; font-family: -apple-system, system-ui, sans-serif;
     font-size: 18px; line-height: 1.7; padding: 20px 20px 80px; }
-  h1,h2,h3,h4 { color: #EDE8E0; margin: 1.4em 0 0.6em; font-weight: 700; line-height: 1.3; }
+  h1,h2,h3,h4 { color: ${text}; margin: 1.4em 0 0.6em; font-weight: 700; line-height: 1.3; }
   p { margin-bottom: 1.2em; }
   img { max-width: 100%; border-radius: 10px; display: block; margin: 1.2em 0; }
-  a { color: #C8AA6E; text-decoration: none; }
-  blockquote { border-left: 3px solid #C8AA6E; padding: 8px 16px; margin: 1.2em 0;
-    color: #8E96A9; font-style: italic; background: #0E1525; border-radius: 0 8px 8px 0; }
-  pre, code { background: #131C2E; padding: 4px 8px; border-radius: 6px;
-    font-size: 14px; font-family: monospace; overflow-x: auto; }
+  a { color: ${accent}; text-decoration: none; }
+  blockquote { border-left: 3px solid ${accent}; padding: 8px 16px; margin: 1.2em 0;
+    color: ${textSec}; font-style: italic; background: ${surface}; border-radius: 0 8px 8px 0; }
+  pre, code { background: ${surfHigh}; padding: 4px 8px; border-radius: 6px;
+    font-size: 14px; font-family: monospace; overflow-x: auto; color: ${text}; }
   pre { padding: 12px 16px; display: block; margin: 1em 0; }
   ul, ol { padding-left: 1.5em; margin-bottom: 1.2em; }
   li { margin-bottom: 0.4em; }
   figure { margin: 1.2em 0; }
-  figcaption { font-size: 13px; color: #505869; text-align: center; margin-top: 6px; }
-  hr { border: none; border-top: 1px solid #1A2540; margin: 2em 0; }
+  figcaption { font-size: 13px; color: ${textMut}; text-align: center; margin-top: 6px; }
+  hr { border: none; border-top: 1px solid ${divider}; margin: 2em 0; }
   mark { border-radius: 3px; padding: 0 2px; }
-  .finished { text-align:center; padding: 40px 20px; color: #34D399; font-size: 15px; }
+  .finished { text-align:center; padding: 40px 20px; color: ${success}; font-size: 15px; }
 </style></head><body>${body}
 <div class="finished">✓ End of article</div>
 </body></html>`;
 }
 
 function PageIndicator({ total, current, color }: { total: number; current: number; color: string }) {
+  const colors = useColors();
+  const pi = useMemo(() => StyleSheet.create({
+    dot: { height: 6, borderRadius: 3 },
+    track: { height: 4, backgroundColor: colors.surfaceHigher, borderRadius: 2, overflow: 'hidden' },
+    fill: { height: 4, borderRadius: 2 },
+  }), [colors]);
   if (total <= 8) {
     return (
       <View style={{ flexDirection: 'row', gap: 5, alignItems: 'center', flex: 1, justifyContent: 'center' }}>
@@ -598,13 +633,7 @@ function PageIndicator({ total, current, color }: { total: number; current: numb
   );
 }
 
-const pi = StyleSheet.create({
-  dot: { height: 6, borderRadius: 3 },
-  track: { height: 4, backgroundColor: colors.surfaceHigher, borderRadius: 2, overflow: 'hidden' },
-  fill: { height: 4, borderRadius: 2 },
-});
-
-const s = StyleSheet.create({
+function createReaderStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: space.md },
   loadingText: { ...T.body, color: colors.textSecondary },
@@ -683,4 +712,12 @@ const s = StyleSheet.create({
     width: 26, height: 26, borderRadius: 13,
     backgroundColor: colors.surfaceHigher, alignItems: 'center', justifyContent: 'center',
   },
-});
+  scrollTopBtn: {
+    position: 'absolute', bottom: 80, right: 20,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: colors.accent,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
+}); }

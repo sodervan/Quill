@@ -4,10 +4,12 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
+import { onAuthStateChanged } from 'firebase/auth';
 
-import { colors } from '../theme';
+import { useColors } from '../theme/ThemeContext';
+import { type as T, space } from '../theme';
 import { getSetting } from '../data/db';
-import { supabase } from '../lib/supabase';
+import { auth } from '../lib/firebase';
 
 import FeedScreen from '../features/feed/FeedScreen';
 import DiscoverScreen from '../features/discover/DiscoverScreen';
@@ -44,6 +46,7 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<TabParamList>();
 
 function Tabs() {
+  const colors = useColors();
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -77,32 +80,33 @@ type AppStage = 'loading' | 'auth' | 'onboarding' | 'app';
 
 export default function Navigation() {
   const [stage, setStage] = useState<AppStage>('loading');
+  const colors = useColors();
 
   useEffect(() => {
-    async function init() {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        const skipped = await getSetting('auth_skipped');
-        if (skipped !== '1') { setStage('auth'); return; }
+    let initialized = false;
+
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!initialized) {
+        initialized = true;
+        // First fire = app startup (existing session or cold start)
+        if (!user) {
+          const skipped = await getSetting('auth_skipped');
+          if (skipped !== '1') { setStage('auth'); return; }
+          const onboarded = await getSetting('onboarding_done');
+          setStage(onboarded === '1' ? 'app' : 'onboarding');
+        } else {
+          // Already signed in — await restore before showing UI
+          try {
+            const m = await import('../lib/sync');
+            await m.uploadLocalToSupabase();
+            await m.restoreFromSupabase();
+          } catch {}
+          const onboarded = await getSetting('onboarding_done');
+          setStage(onboarded === '1' ? 'app' : 'onboarding');
+        }
       } else {
-        // Already signed in (app restart) — await restore so FeedScreen sees all follows
-        try {
-          const m = await import('../lib/sync');
-          await m.uploadLocalToSupabase();
-          await m.restoreFromSupabase();
-        } catch {}
-      }
-      const onboarded = await getSetting('onboarding_done');
-      setStage(onboarded === '1' ? 'app' : 'onboarding');
-    }
-    void init();
-
-    const authRequestSub = DeviceEventEmitter.addListener('navigateToAuth', () => setStage('auth'));
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session) {
-        if (_event === 'SIGNED_IN') {
-          // Show spinner immediately, await restore, then navigate — no onboarding flash
+        // Subsequent fires = sign-in / sign-out events
+        if (user) {
           setStage('loading');
           import('../lib/sync').then(async (m) => {
             await m.uploadLocalToSupabase();
@@ -114,15 +118,14 @@ export default function Navigation() {
             setStage(val === '1' ? 'app' : 'onboarding');
           });
         } else {
-          getSetting('onboarding_done').then((val) => {
-            setStage(val === '1' ? 'app' : 'onboarding');
-          });
+          setStage('auth');
         }
-      } else if (_event === 'SIGNED_OUT') {
-        setStage('auth');
       }
     });
-    return () => { subscription.unsubscribe(); authRequestSub.remove(); };
+
+    const authRequestSub = DeviceEventEmitter.addListener('navigateToAuth', () => setStage('auth'));
+
+    return () => { unsubscribe(); authRequestSub.remove(); };
   }, []);
 
   if (stage === 'loading') {
@@ -145,7 +148,7 @@ export default function Navigation() {
             const onboarded = await gs('onboarding_done');
             setStage(onboarded === '1' ? 'app' : 'onboarding');
           }
-          // Signed in: onAuthStateChange fires and handles restore + navigation
+          // Signed in: onAuthStateChanged fires and handles restore + navigation
         }}
       />
     );

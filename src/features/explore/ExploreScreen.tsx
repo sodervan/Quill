@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator, FlatList, Image, ScrollView, StyleSheet,
   Text, TouchableOpacity, View, StatusBar,
@@ -11,7 +11,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { format } from 'date-fns';
 
 import { RootStackParamList } from '../../navigation';
-import { colors, type as T, space, radius, shadow } from '../../theme';
+import { type as T, space, radius, shadow } from '../../theme';
+import { useColors } from '../../theme/ThemeContext';
 import { PUBLICATIONS, TOPICS, Publication } from '../../data/publications';
 import { fetchFeed, FeedItem } from '../../data/rss';
 import {
@@ -85,6 +86,8 @@ const TOPIC_CHIPS = [
 ];
 
 export default function ExploreScreen() {
+  const colors = useColors();
+  const s = useMemo(() => createExploreStyles(colors), [colors]);
   const nav = useNavigation<Nav>();
   const [selectedTopic, setSelectedTopic] = useState('foryou');
   const [articles, setArticles] = useState<ArticleRow[]>([]);
@@ -390,7 +393,7 @@ export default function ExploreScreen() {
   );
 }
 
-const s = StyleSheet.create({
+function createExploreStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
 
   header: {
@@ -479,4 +482,4 @@ const s = StyleSheet.create({
   },
   remoteBtnActive: { borderColor: colors.success + '66', backgroundColor: colors.success + '18' },
   remoteBtnText: { ...T.caption, color: colors.accent, fontWeight: '700' },
-});
+}); }

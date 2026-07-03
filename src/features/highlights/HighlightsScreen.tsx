@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   StatusBar, Alert,
@@ -11,13 +11,16 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { format } from 'date-fns';
 
 import { getAllHighlights, deleteHighlight } from '../../data/db';
-import { colors, type as T, space, radius } from '../../theme';
+import { type as T, space, radius } from '../../theme';
+import { useColors } from '../../theme/ThemeContext';
 import { RootStackParamList } from '../../navigation';
 
 type HL = { id: number; article_id: string; selected_text: string; color: string; created_at: number; article_title: string | null; article_link: string | null };
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
 
 export default function HighlightsScreen() {
+  const colors = useColors();
+  const s = useMemo(() => createHighlightStyles(colors), [colors]);
   const nav = useNavigation<Nav>();
   const [items, setItems] = useState<HL[]>([]);
   const [loading, setLoading] = useState(true);
@@ -97,7 +100,7 @@ export default function HighlightsScreen() {
   );
 }
 
-const s = StyleSheet.create({
+function createHighlightStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
@@ -126,4 +129,4 @@ const s = StyleSheet.create({
   articleTitle: { ...T.label, color: colors.textMuted, marginBottom: 8 },
   cardBottom: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   date: { ...T.caption, color: colors.textMuted },
-});
+}); }

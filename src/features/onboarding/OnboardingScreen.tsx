@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView, StatusBar, Dimensions,
 } from 'react-native';
@@ -6,7 +6,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { TOPICS, PUBLICATIONS } from '../../data/publications';
 import { followPublication, setSetting } from '../../data/db';
-import { colors, type as T, space, radius } from '../../theme';
+import { type as T, space, radius } from '../../theme';
+import { useColors } from '../../theme/ThemeContext';
 
 const { width } = Dimensions.get('window');
 
@@ -17,6 +18,8 @@ export default function OnboardingScreen({ onDone }: Props) {
   const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
   const [selectedPubs, setSelectedPubs] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
+  const colors = useColors();
+  const s = useMemo(() => createOnboardingStyles(colors), [colors]);
 
   const suggestedPubs = PUBLICATIONS.filter((p) =>
     p.topics.some((t) => selectedTopics.has(t)),
@@ -165,7 +168,7 @@ export default function OnboardingScreen({ onDone }: Props) {
   );
 }
 
-const s = StyleSheet.create({
+function createOnboardingStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
   header: { alignItems: 'center', paddingTop: 72, paddingBottom: 24 },
   logoRing: {
@@ -224,4 +227,4 @@ const s = StyleSheet.create({
   btnText: { ...T.h2, color: colors.bgDeep },
   skipBtn: { alignItems: 'center', paddingVertical: 8 },
   skipText: { ...T.body, color: colors.textMuted },
-});
+}); }

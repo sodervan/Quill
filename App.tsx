@@ -5,10 +5,13 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { initDb } from './src/data/db';
 import Navigation from './src/navigation';
-import { colors } from './src/theme';
+import { ThemeProvider, useColors } from './src/theme/ThemeContext';
+import { useTheme } from './src/theme/ThemeContext';
 
-export default function App() {
+function AppInner() {
   const [ready, setReady] = useState(false);
+  const colors = useColors();
+  const { isDark } = useTheme();
 
   useEffect(() => {
     initDb().then(() => setReady(true));
@@ -24,8 +27,16 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <StatusBar style="light" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <Navigation />
     </SafeAreaProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <AppInner />
+    </ThemeProvider>
   );
 }

@@ -498,7 +498,7 @@ export async function upsertRemoteSource(src: RemoteSourceRow): Promise<void> {
     [src.id, src.name, src.feed_url, src.description, src.color, src.added_at],
   );
   cacheRemoteMeta(src.id, src.name, src.color, src.feed_url);
-  // Persist metadata to Supabase so remote follows survive reinstall
+  // Persist metadata to Firestore so remote follows survive reinstall
   import('../lib/sync').then((m) => m.syncRemoteSource(src)).catch(() => {});
 }
 
