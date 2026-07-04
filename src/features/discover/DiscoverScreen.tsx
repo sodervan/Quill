@@ -16,6 +16,7 @@ import {
 } from '../../data/db';
 import { searchFeedly, RemoteSource } from '../../data/feedSearch';
 import { fetchFeed, FeedItem } from '../../data/rss';
+import { scrapeForArticles, deriveBlogUrl } from '../../data/scraper';
 import { ArticleRow, upsertArticles } from '../../data/db';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
 
@@ -147,7 +148,18 @@ export default function DiscoverScreen() {
           await upsertArticles(items.slice(0, 20).map((i) => feedItemToRow(i, id)));
           DeviceEventEmitter.emit('feedRefreshNeeded');
         })
-        .catch(() => {});
+        .catch(async () => {
+          // RSS fetch failed — try scraping the blog page as fallback
+          const blogUrl = deriveBlogUrl(src.feedUrl);
+          if (!blogUrl) return;
+          try {
+            const { items: scraped } = await scrapeForArticles(blogUrl);
+            if (scraped.length > 0) {
+              await upsertArticles(scraped.slice(0, 20).map((i) => feedItemToRow(i, id)));
+              DeviceEventEmitter.emit('feedRefreshNeeded');
+            }
+          } catch {}
+        });
     } finally {
       setFollowingRemote((s) => { const n = new Set(s); n.delete(id); return n; });
     }

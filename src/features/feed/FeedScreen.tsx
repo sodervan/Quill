@@ -611,7 +611,19 @@ export default function FeedScreen() {
           }
 
           if (paginationUrl) nextMap.set(pubId, paginationUrl);
-        } catch {}
+        } catch {
+          // RSS fetch completely failed — try scraping the blog as sole source of articles
+          const blogUrl = deriveBlogUrl(feedUrl);
+          if (blogUrl) {
+            try {
+              const { items: scraped, nextUrl: scrapedNext } = await scrapeForArticles(blogUrl);
+              if (scraped.length > 0) {
+                await upsertArticles(scraped.map((item) => feedItemToRow(item, pubId)));
+                if (scrapedNext) nextMap.set(pubId, scrapedNext);
+              }
+            } catch {}
+          }
+        }
       }));
       setNextUrlMap(nextMap);
 

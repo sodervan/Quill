@@ -177,13 +177,15 @@ export interface ArticleRow {
 export async function upsertArticles(articles: ArticleRow[]): Promise<void> {
   const db = getDb();
   for (const a of articles) {
-    await db.runAsync(
-      `INSERT OR REPLACE INTO articles
-         (id, publication_id, title, link, pub_date, excerpt, content_html, image_url, word_count, fetched_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [a.id, a.publication_id, a.title, a.link, a.pub_date,
-       a.excerpt ?? null, a.content_html ?? null, a.image_url ?? null, a.word_count ?? null, a.fetched_at],
-    );
+    try {
+      await db.runAsync(
+        `INSERT OR REPLACE INTO articles
+           (id, publication_id, title, link, pub_date, excerpt, content_html, image_url, word_count, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [a.id, a.publication_id, a.title, a.link, a.pub_date,
+         a.excerpt ?? null, a.content_html ?? null, a.image_url ?? null, a.word_count ?? null, a.fetched_at],
+      );
+    } catch {}
   }
 }
 
