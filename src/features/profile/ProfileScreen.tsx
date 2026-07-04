@@ -27,12 +27,13 @@ const STEP = CELL + GAP;
 const WEEKS = 16;
 
 function cellColor(pages: number, isDark: boolean): string {
-  if (pages === 0) return isDark ? '#1E2D45' : '#E5E7EB';
-  if (pages <= 2) return '#0d3d1f';
-  if (pages <= 5) return '#14532d';
-  if (pages <= 9) return '#166534';
-  if (pages <= 14) return '#15803d';
-  return '#22c55e';
+  if (pages === 0) return isDark ? '#1E293B' : '#E5E7EB';
+  const g = '#22c55e';
+  if (pages <= 2)  return g + '3D';
+  if (pages <= 5)  return g + '66';
+  if (pages <= 9)  return g + '99';
+  if (pages <= 14) return g + 'CC';
+  return g;
 }
 
 function ContributionGraph({ history }: { history: { date: string; pages: number }[] }) {

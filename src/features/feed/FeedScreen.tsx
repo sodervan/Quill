@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Animated, Dimensions, FlatList, Image, Linking, Modal,
-  NativeScrollEvent, NativeSyntheticEvent, PanResponder, RefreshControl,
-  ScrollView, Share, StyleSheet, Text, TouchableOpacity, View, StatusBar,
+  ActivityIndicator, Animated, DeviceEventEmitter, Dimensions, FlatList,
+  Image, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder,
+  RefreshControl, ScrollView, Share, StyleSheet, Text, TouchableOpacity, View, StatusBar,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
@@ -651,6 +651,11 @@ export default function FeedScreen() {
 
   useFocusEffect(useCallback(() => {
     void loadArticles(false);
+    // When a remote-follow background fetch completes, reload from SQLite immediately
+    const sub = DeviceEventEmitter.addListener('feedRefreshNeeded', () => {
+      void loadArticles(false);
+    });
+    return () => sub.remove();
   }, [loadArticles]));
 
   // Batch-refresh progress whenever the displayed list changes (including focus returns)

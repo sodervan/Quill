@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, ScrollView, StyleSheet, Text, TextInput,
-  TouchableOpacity, View, StatusBar,
+  ActivityIndicator, DeviceEventEmitter, FlatList, ScrollView, StyleSheet,
+  Text, TextInput, TouchableOpacity, View, StatusBar,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -143,7 +143,10 @@ export default function DiscoverScreen() {
       await followPublication(id);
       setFollowedIds((s) => new Set(s).add(id));
       fetchFeed(src.feedUrl)
-        .then((items) => upsertArticles(items.slice(0, 20).map((i) => feedItemToRow(i, id))))
+        .then(async (items) => {
+          await upsertArticles(items.slice(0, 20).map((i) => feedItemToRow(i, id)));
+          DeviceEventEmitter.emit('feedRefreshNeeded');
+        })
         .catch(() => {});
     } finally {
       setFollowingRemote((s) => { const n = new Set(s); n.delete(id); return n; });
