@@ -241,7 +241,7 @@ function HeroCardInner({
       <View style={s.heroPubRow}>
         <View style={[s.pubPill, { backgroundColor: c + '1A', borderColor: c + '44' }]}>
           <FaviconIcon feedUrl={feedUrl} emoji={pub?.emoji ?? '📰'} size={18} />
-          <Text style={[s.pubPillText, { color: c }]}>{pubName.toUpperCase()}</Text>
+          <Text style={[s.pubPillText, { color: c }]} numberOfLines={1}>{pubName.toUpperCase()}</Text>
         </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           {isSaved && <Ionicons name="bookmark" size={16} color={colors.accent} />}
@@ -1441,9 +1441,10 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
     flexDirection: 'row', alignItems: 'center', gap: 5,
     paddingHorizontal: 10, paddingVertical: 4,
     borderRadius: radius.full, borderWidth: 1,
+    flexShrink: 1, maxWidth: '68%', overflow: 'hidden',
   },
   pubPillEmoji: { fontSize: 14 },
-  pubPillText: { ...T.badge, letterSpacing: 0.5 },
+  pubPillText: { ...T.badge, letterSpacing: 0.5, flexShrink: 1 },
   heroImage: {
     width: '100%', height: 180, borderRadius: radius.md,
     marginBottom: space.sm, backgroundColor: colors.surfaceHigher,

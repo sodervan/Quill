@@ -585,6 +585,17 @@ function applyHighlightsToHtml(html: string, highlights: HighlightRow[]): string
   return result;
 }
 
+function decodeHtmlEntities(s: string): string {
+  // Some RSS feeds HTML-encode their content:encoded instead of wrapping in CDATA.
+  // Decode common entities so the WebView renders markup rather than showing raw tags.
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 function buildStyledHtml(content: string, title: string, isHtml = false, highlights: HighlightRow[] = [], isDark = true): string {
   const bg       = isDark ? '#090C15' : '#F5F4F0';
   const text     = isDark ? '#EDE8E0' : '#1C1A17';
@@ -596,7 +607,9 @@ function buildStyledHtml(content: string, title: string, isHtml = false, highlig
   const divider  = isDark ? '#1A2540' : 'rgba(0,0,0,0.09)';
   const success  = isDark ? '#34D399' : '#16A34A';
 
-  const rawBody = isHtml ? content : content.split('\n\n').map((p) => `<p>${p}</p>`).join('');
+  const rawBody = isHtml
+    ? decodeHtmlEntities(content)
+    : content.split('\n\n').map((p) => `<p>${p}</p>`).join('');
   const body = highlights.length > 0 ? applyHighlightsToHtml(rawBody, highlights) : rawBody;
   return `<!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">

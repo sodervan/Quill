@@ -111,7 +111,7 @@ function parseRssItem(el: ReturnType<typeof parse>): FeedItem {
   const pubDate = parsedPubDate && !isNaN(parsedPubDate.getTime()) ? parsedPubDate : new Date(0);
 
   const contentNode = el.querySelector('content\\:encoded') ?? el.querySelector('encoded');
-  const contentRaw = contentNode ? stripCdata(contentNode.rawText || contentNode.innerHTML) : undefined;
+  const contentRaw = contentNode ? decodeEntities(stripCdata(contentNode.rawText || contentNode.innerHTML)) : undefined;
 
   const descNode = el.querySelector('description');
   const descriptionRaw = descNode ? stripCdata(descNode.rawText || descNode.innerHTML) : '';
@@ -136,7 +136,7 @@ function parseAtomEntry(el: ReturnType<typeof parse>): FeedItem {
   const pubDate = parsedAtomDate && !isNaN(parsedAtomDate.getTime()) ? parsedAtomDate : new Date(0);
 
   const contentNode = el.querySelector('content');
-  const contentRaw = contentNode ? stripCdata(contentNode.rawText || contentNode.innerHTML) : undefined;
+  const contentRaw = contentNode ? decodeEntities(stripCdata(contentNode.rawText || contentNode.innerHTML)) : undefined;
   const summaryNode = el.querySelector('summary');
   const summaryRaw = summaryNode ? stripCdata(summaryNode.rawText || summaryNode.innerHTML) : '';
   const excerpt = summaryRaw ? htmlToPlainText(summaryRaw).slice(0, 300) : '';
@@ -176,8 +176,17 @@ function isImageUrl(url: string): boolean {
 }
 
 export function stripCdata(raw: string): string {
-  // Replace ALL CDATA sections anywhere in the string (feeds vary wildly)
   return raw.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim();
+}
+
+function decodeEntities(s: string): string {
+  // Some feeds HTML-encode content instead of using CDATA; decode so stored HTML is actual markup.
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 export function htmlToPlainText(html: string): string {
