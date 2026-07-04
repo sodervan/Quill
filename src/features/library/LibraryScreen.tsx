@@ -122,11 +122,11 @@ export default function LibraryScreen({ navigation }: Props) {
                     <View style={s.cardTop}>
                       <View style={[s.pubChip, { backgroundColor: c + '18' }]}>
                         <FaviconAvatar feedUrl={pi.iconUrl} emoji={pi.emoji} size={14} />
-                        <Text style={[s.pubChipText, { color: c }]}>
+                        <Text style={[s.pubChipText, { color: c }]} numberOfLines={1}>
                           {pi.name}
                         </Text>
                       </View>
-                      <Text style={s.metaAge}>{age(item.pub_date)}</Text>
+                      <Text style={s.metaAge} numberOfLines={1}>{age(item.pub_date)}</Text>
                     </View>
 
                     <Text style={s.title} numberOfLines={3}>{item.title}</Text>
@@ -143,10 +143,17 @@ export default function LibraryScreen({ navigation }: Props) {
                             <Text style={s.metaText}>{readingTime(item.word_count)}</Text>
                           </View>
                         ) : null}
-                        <View style={s.metaPill}>
-                          <Ionicons name="bookmark" size={12} color={colors.accent} />
-                          <Text style={[s.metaText, { color: colors.accent }]}>Saved</Text>
-                        </View>
+                        {prog >= 1 ? (
+                          <View style={[s.metaPill, { backgroundColor: colors.success + '18' }]}>
+                            <Ionicons name="checkmark-circle" size={12} color={colors.success} />
+                            <Text style={[s.metaText, { color: colors.success }]}>Read</Text>
+                          </View>
+                        ) : (
+                          <View style={s.metaPill}>
+                            <Ionicons name="bookmark" size={12} color={colors.accent} />
+                            <Text style={[s.metaText, { color: colors.accent }]}>Saved</Text>
+                          </View>
+                        )}
                       </View>
                       <TouchableOpacity
                         style={s.unsaveBtn}
@@ -202,9 +209,12 @@ function createLibraryStyles(colors: ReturnType<typeof useColors>) { return Styl
   accentStrip: { width: 3 },
   cardContent: { flex: 1, padding: space.md },
   cardTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 8 },
-  pubChip: { flexDirection: 'row', alignItems: 'center', borderRadius: radius.full, paddingHorizontal: 8, paddingVertical: 3 },
-  pubChipText: { ...T.badge, fontSize: 11 },
-  metaAge: { ...T.caption, color: colors.textMuted, marginLeft: 'auto' },
+  pubChip: {
+    flexDirection: 'row', alignItems: 'center', borderRadius: radius.full,
+    paddingHorizontal: 8, paddingVertical: 3, flexShrink: 1, maxWidth: '70%', overflow: 'hidden',
+  },
+  pubChipText: { ...T.badge, fontSize: 11, flexShrink: 1 },
+  metaAge: { ...T.caption, color: colors.textMuted, flexShrink: 0 },
   title: { ...T.h2, color: colors.text, lineHeight: 24, marginBottom: 6 },
   excerpt: { ...T.caption, color: colors.textSecondary, lineHeight: 18, marginBottom: 10 },
   cardBottom: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
