@@ -233,7 +233,7 @@ export async function getProgressBatch(articleIds: string[]): Promise<Map<string
   );
   return new Map(rows.map((r) => [
     r.article_id,
-    Math.max(r.pages_read / r.total_pages, r.scroll_depth ?? 0),
+    r.completed ? 1 : Math.max(r.pages_read / r.total_pages, r.scroll_depth ?? 0),
   ]));
 }
 
@@ -282,6 +282,12 @@ export async function recordScrollProgress(articleId: string, depth: number): Pr
   const now = Date.now();
   const completed = depth >= 0.9 ? 1 : 0;
 
+  // Check prior state so we only increment daily pages once per article completion
+  const prev = await db.getFirstAsync<{ completed: number }>(
+    `SELECT completed FROM reading_progress WHERE article_id = ?`, [articleId],
+  );
+  const wasCompleted = prev?.completed ?? 0;
+
   await db.runAsync(
     `INSERT INTO reading_progress (article_id, pages_read, total_pages, scroll_depth, completed, last_read_at)
      VALUES (?, 0, 1, ?, ?, ?)
@@ -291,6 +297,23 @@ export async function recordScrollProgress(articleId: string, depth: number): Pr
        last_read_at = excluded.last_read_at`,
     [articleId, depth, completed, now],
   );
+
+  // Count one page toward the daily goal the first time a scroll-mode article is completed
+  if (completed && !wasCompleted) {
+    const key = todayKey();
+    await db.runAsync(
+      `INSERT INTO daily_log (date, qualifying_reads, pages_read) VALUES (?, 0, 1)
+       ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + 1`,
+      [key],
+    );
+    const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number }>(
+      `SELECT qualifying_reads, pages_read FROM daily_log WHERE date = ?`, [key],
+    );
+    if (row) {
+      import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads, row.pages_read)).catch(() => {});
+    }
+  }
+
   import('../lib/sync').then((m) => m.syncReadingProgress(articleId)).catch(() => {});
 }
 
@@ -444,10 +467,10 @@ export async function computeStreak(): Promise<number> {
   );
   if (rows.length === 0) return 0;
 
-  // A day counts if pages_read >= goal, or (legacy rows) qualifying_reads >= goal
+  // A day counts if pages_read >= goal OR qualifying_reads >= goal (covers scroll-mode reads)
   const metDates = new Set(
     rows
-      .filter((r) => r.pages_read >= goal || (r.pages_read === 0 && r.qualifying_reads >= goal))
+      .filter((r) => r.pages_read >= goal || r.qualifying_reads >= goal)
       .map((r) => r.date),
   );
 

@@ -260,7 +260,7 @@ function HeroCardInner({
 
       {article.image_url ? <Image source={{ uri: article.image_url }} style={s.heroImage} resizeMode="cover" /> : null}
       <Text style={s.heroTitle} numberOfLines={3}>{article.title}</Text>
-      {article.excerpt ? <Text style={s.heroExcerpt} numberOfLines={2}>{stripHtml(article.excerpt)}</Text> : null}
+      {article.excerpt && stripHtml(article.excerpt).trim().length > 25 ? <Text style={s.heroExcerpt} numberOfLines={2}>{stripHtml(article.excerpt)}</Text> : null}
 
       <View style={s.heroMeta}>
         {smartAge(article.pub_date) ? <Text style={s.metaChip}>{smartAge(article.pub_date)}</Text> : null}
@@ -345,7 +345,7 @@ function ArticleCardInner({
           <Text style={[s.cardTitle, article.image_url ? { flex: 1 } : {}]} numberOfLines={3}>{article.title}</Text>
           {article.image_url ? <Image source={{ uri: article.image_url }} style={s.cardThumb} resizeMode="cover" /> : null}
         </View>
-        {article.excerpt ? (
+        {article.excerpt && stripHtml(article.excerpt).trim().length > 25 ? (
           <Text style={s.cardExcerpt} numberOfLines={2}>{stripHtml(article.excerpt)}</Text>
         ) : null}
         <View style={s.cardBottom}>
@@ -758,6 +758,14 @@ export default function FeedScreen() {
     setLoadingMoreIds((prev) => { const s = new Set(prev); s.delete(pubId); return s; });
   }
 
+  function handleAutoLoadMore() {
+    if (feedTab !== 'following') return;
+    const visiblePubIds = [...nextUrlMap.keys()].filter(
+      (pubId) => !activeFilter || activeFilter === pubId,
+    );
+    visiblePubIds.forEach((pubId) => void handleLoadMore(pubId));
+  }
+
   function selectFilter(id: string | null) {
     setShuffled(false);
     shuffledRef.current = false;
@@ -941,7 +949,7 @@ export default function FeedScreen() {
   const inProgressArticles = useMemo(() =>
     allArticles.filter((a) => {
       const p = progressMap.get(a.id) ?? 0;
-      return p > 0.02 && p < 0.95;
+      return p > 0.02 && p < 1;
     }).slice(0, 8),
   [allArticles, progressMap]);
 
@@ -1115,6 +1123,8 @@ export default function FeedScreen() {
             updateCellsBatchingPeriod={50}
             windowSize={10}
             initialNumToRender={10}
+            onEndReached={handleAutoLoadMore}
+            onEndReachedThreshold={0.4}
             ListHeaderComponent={feedTab === 'following' && inProgressArticles.length > 0 ? (
               <View style={s.continueStrip}>
                 <Text style={s.continueTitle}>Continue reading</Text>
@@ -1152,37 +1162,10 @@ export default function FeedScreen() {
             ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
             ListFooterComponent={(() => {
               if (feedTab !== 'following') return null;
-              const visiblePubIds = [...nextUrlMap.keys()].filter(
-                (pubId) => !activeFilter || activeFilter === pubId,
-              );
-              if (visiblePubIds.length === 0) return null;
+              if (loadingMoreIds.size === 0) return null;
               return (
                 <View style={s.loadMoreSection}>
-                  <Text style={s.loadMoreHeading}>More available</Text>
-                  {visiblePubIds.map((pubId) => {
-                    const pub = PUBLICATIONS.find((p) => p.id === pubId);
-                    const rm = remoteMetaMap.get(pubId);
-                    const name = pub?.name ?? rm?.name ?? 'Source';
-                    const color = pub?.color ?? rm?.color ?? colors.accent;
-                    const isLoading = loadingMoreIds.has(pubId);
-                    return (
-                      <TouchableOpacity
-                        key={pubId}
-                        style={[s.loadMoreBtn, { borderColor: color + '55', backgroundColor: color + '12' }]}
-                        onPress={() => void handleLoadMore(pubId)}
-                        disabled={isLoading}
-                        activeOpacity={0.7}
-                      >
-                        {isLoading
-                          ? <ActivityIndicator size="small" color={color} />
-                          : <Ionicons name="add-circle-outline" size={18} color={color} />
-                        }
-                        <Text style={[s.loadMoreText, { color }]}>
-                          {isLoading ? 'Loading…' : `Load more from ${name}`}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
+                  <ActivityIndicator color={colors.accent} />
                 </View>
               );
             })()}

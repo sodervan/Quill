@@ -18,12 +18,48 @@ export async function fetchFeed(url: string): Promise<FeedItem[]> {
   return items;
 }
 
+const FEED_HEADERS = {
+  'User-Agent': 'Perch/1.0 RSS Reader',
+  'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
+};
+
+async function fetchWithTimeout(url: string, timeoutMs = 15000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: FEED_HEADERS });
+    clearTimeout(timer);
+    return res;
+  } catch (e) {
+    clearTimeout(timer);
+    throw e;
+  }
+}
+
 /** Fetches one page and returns items + the URL of the next page (if any). */
 export async function fetchFeedPage(url: string): Promise<{ items: FeedItem[]; nextUrl: string | null }> {
-  const res = await fetch(url, { headers: { 'User-Agent': 'Perch/1.0 RSS Reader' } });
+  // Prefer HTTPS; fall back to the original URL if the upgrade 4xx/5xx-fails
+  const httpsUrl = url.startsWith('http://') ? url.replace('http://', 'https://') : url;
+
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(httpsUrl);
+    if (!res.ok && httpsUrl !== url) {
+      // HTTPS upgrade returned an error — try original URL
+      res = await fetchWithTimeout(url);
+    }
+  } catch {
+    if (httpsUrl !== url) {
+      // HTTPS timed out or network-failed — try original HTTP URL
+      res = await fetchWithTimeout(url);
+    } else {
+      throw new Error('Feed fetch failed: network error');
+    }
+  }
+
   if (!res.ok) throw new Error(`Feed fetch failed: ${res.status}`);
   const xml = await res.text();
-  return parseXmlWithPagination(xml, url);
+  return parseXmlWithPagination(xml, res.url || url);
 }
 
 function extractNextUrl(xml: string, root: ReturnType<typeof parse>, baseUrl: string): string | null {
