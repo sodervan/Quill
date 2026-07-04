@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Dimensions, ScrollView, StatusBar,
+  ActivityIndicator, Alert, Dimensions, Linking, ScrollView, StatusBar,
   StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -51,6 +51,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
   const [selectedText, setSelectedText] = useState('');
   const [highlights, setHighlights] = useState<HighlightRow[]>([]);
   const [stableHtml, setStableHtml] = useState('');
+  const [webViewLoadError, setWebViewLoadError] = useState(false);
 
   const readStartRef = useRef<number>(Date.now());
   const scrollDepthRef = useRef(0);
@@ -69,6 +70,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
 
   useEffect(() => {
     async function load() {
+      setWebViewLoadError(false);
       const article = await getArticleById(articleId);
       if (!article) { setLoading(false); return; }
 
@@ -310,7 +312,29 @@ export default function ReaderScreen({ route, navigation }: Props) {
 
         {/* ── Content ── */}
         {useWebView ? (
-          <WebView source={{ uri: articleUrl }} style={{ flex: 1 }} />
+          webViewLoadError ? (
+            <View style={s.centered}>
+              <Ionicons name="globe-outline" size={48} color={colors.textMuted} />
+              <Text style={s.errorText}>Couldn't load this article</Text>
+              <Text style={[s.loadingText, { textAlign: 'center', paddingHorizontal: 32 }]}>
+                The page could not be reached. You can try opening it in your browser.
+              </Text>
+              <TouchableOpacity
+                onPress={() => void Linking.openURL(articleUrl)}
+                style={[s.pubChip, { backgroundColor: colors.accentMuted, borderColor: colors.accentBorder, gap: 6, marginTop: 8 }]}
+              >
+                <Ionicons name="open-outline" size={14} color={colors.accent} />
+                <Text style={{ color: colors.accent, fontWeight: '700' }}>Open in browser</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <WebView
+              source={{ uri: articleUrl }}
+              style={{ flex: 1 }}
+              onError={() => setWebViewLoadError(true)}
+              onHttpError={(e) => { if (e.nativeEvent.statusCode >= 400) setWebViewLoadError(true); }}
+            />
+          )
         ) : pages.length === 0 ? (
           <View style={s.centered}>
             <Ionicons name="alert-circle-outline" size={48} color={colors.textMuted} />

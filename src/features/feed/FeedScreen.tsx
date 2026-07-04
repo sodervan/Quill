@@ -478,6 +478,9 @@ export default function FeedScreen() {
   const [nextUrlMap, setNextUrlMap] = useState<Map<string, string>>(new Map());
   const [loadingMoreIds, setLoadingMoreIds] = useState<Set<string>>(new Set());
 
+  // Fallback: blog URLs for pubs with no RSS pagination — scraped lazily on first end-of-feed
+  const [scrapeUrlMap, setScrapeUrlMap] = useState<Map<string, string>>(new Map());
+
   // Progress for all displayed articles — refreshed as one batch query when displayed changes
   const [progressMap, setProgressMap] = useState<Map<string, number>>(new Map());
 
@@ -611,6 +614,19 @@ export default function FeedScreen() {
         } catch {}
       }));
       setNextUrlMap(nextMap);
+
+      // For every pub with articles but no RSS pagination, derive a blog URL for lazy scraping
+      const fMap = new Map<string, string>();
+      for (const pubId of ids) {
+        if (nextMap.has(pubId)) continue;
+        const pub = PUBLICATIONS.find((p) => p.id === pubId);
+        const remote = remoteById.get(pubId);
+        const feedUrl = pub?.feedUrl ?? remote?.feed_url;
+        if (!feedUrl) continue;
+        const blogUrl = deriveBlogUrl(feedUrl);
+        if (blogUrl) fMap.set(pubId, blogUrl);
+      }
+      setScrapeUrlMap(fMap);
     }
 
     const [rows, saved] = await Promise.all([
@@ -758,12 +774,49 @@ export default function FeedScreen() {
     setLoadingMoreIds((prev) => { const s = new Set(prev); s.delete(pubId); return s; });
   }
 
+  async function handleScrapeLoad(pubId: string) {
+    const blogUrl = scrapeUrlMap.get(pubId);
+    if (!blogUrl || loadingMoreIds.has(pubId)) return;
+    // Remove immediately so repeated end-of-feed events don't retry the same scrape
+    setScrapeUrlMap((prev) => { const m = new Map(prev); m.delete(pubId); return m; });
+    setLoadingMoreIds((prev) => new Set(prev).add(pubId));
+    try {
+      const { items, nextUrl } = await scrapeForArticles(blogUrl);
+      if (items.length > 0) {
+        await upsertArticles(items.map((item) => feedItemToRow(item, pubId)));
+        const freshRows = await getArticlesForPublications([pubId]);
+        setAllArticles((prev) => {
+          const existing = new Set(prev.map((a) => a.id));
+          const added = freshRows.filter((a) => !existing.has(a.id));
+          return added.length ? [...prev, ...added] : prev;
+        });
+        setDisplayed((prev) => {
+          const existing = new Set(prev.map((a) => a.id));
+          const toAdd = freshRows.filter(
+            (a) => !existing.has(a.id) && !hiddenRef.current.has(a.id) &&
+              (!activeFilter || activeFilter === pubId),
+          );
+          return toAdd.length ? [...prev, ...toAdd] : prev;
+        });
+      }
+      // If scraping found pagination, wire it up for further scroll-loads
+      if (nextUrl) setNextUrlMap((prev) => new Map(prev).set(pubId, nextUrl));
+    } catch {}
+    setLoadingMoreIds((prev) => { const s = new Set(prev); s.delete(pubId); return s; });
+  }
+
   function handleAutoLoadMore() {
     if (feedTab !== 'following') return;
-    const visiblePubIds = [...nextUrlMap.keys()].filter(
+    // RSS-paginated pubs
+    const rssIds = [...nextUrlMap.keys()].filter(
       (pubId) => !activeFilter || activeFilter === pubId,
     );
-    visiblePubIds.forEach((pubId) => void handleLoadMore(pubId));
+    rssIds.forEach((pubId) => void handleLoadMore(pubId));
+    // Unpaginated pubs — try scraping their blog page once per session
+    const scrapeIds = [...scrapeUrlMap.keys()].filter(
+      (pubId) => !activeFilter || activeFilter === pubId,
+    );
+    scrapeIds.forEach((pubId) => void handleScrapeLoad(pubId));
   }
 
   function selectFilter(id: string | null) {
