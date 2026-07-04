@@ -281,7 +281,7 @@ export default function ProfileScreen() {
                 </TouchableOpacity>
               </View>
             </View>
-            <Text style={s.goalHint}>Pages are counted as you flip through articles in page mode.</Text>
+            <Text style={s.goalHint}>Finishing an article counts as 1 page. Page-flip mode tracks each page individually.</Text>
           </View>
         </View>
 

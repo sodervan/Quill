@@ -424,10 +424,10 @@ export async function getTodayReads(): Promise<number> {
 
 export async function getTodayPages(): Promise<number> {
   const db = getDb();
-  const row = await db.getFirstAsync<{ pages_read: number }>(
-    `SELECT pages_read FROM daily_log WHERE date = ?`, [todayKey()],
+  const row = await db.getFirstAsync<{ pages_read: number; qualifying_reads: number }>(
+    `SELECT pages_read, qualifying_reads FROM daily_log WHERE date = ?`, [todayKey()],
   );
-  return row?.pages_read ?? 0;
+  return Math.max(row?.pages_read ?? 0, row?.qualifying_reads ?? 0);
 }
 
 export async function getDailyGoal(): Promise<number> {
@@ -442,10 +442,11 @@ export async function setDailyGoal(n: number): Promise<void> {
 
 export async function getDailyLogHistory(days: number): Promise<{ date: string; pages: number }[]> {
   const db = getDb();
-  const rows = await db.getAllAsync<{ date: string; pages_read: number }>(
-    `SELECT date, pages_read FROM daily_log ORDER BY date ASC`,
+  const rows = await db.getAllAsync<{ date: string; pages_read: number; qualifying_reads: number }>(
+    `SELECT date, pages_read, qualifying_reads FROM daily_log ORDER BY date ASC`,
   );
-  const map = new Map(rows.map((r) => [r.date, r.pages_read]));
+  // Use qualifying_reads as a fallback for days that predate the pages_read tracking fix
+  const map = new Map(rows.map((r) => [r.date, Math.max(r.pages_read, r.qualifying_reads)]));
   const result: { date: string; pages: number }[] = [];
   const today = new Date();
   for (let i = days - 1; i >= 0; i--) {
