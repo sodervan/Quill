@@ -486,6 +486,9 @@ export default function FeedScreen() {
 
   // Errors surfaced after a pull-to-refresh
   const [fetchErrors, setFetchErrors] = useState<{ name: string; reason: string }[]>([]);
+  const [errorSheetMounted, setErrorSheetMounted] = useState(false);
+  const errorSheetAnimY = useRef(new Animated.Value(500)).current;
+  const errorSheetAnimBg = useRef(new Animated.Value(0)).current;
 
   // Hidden articles — ref keeps applyFilter stable (no stale closure on refresh)
   const hiddenRef = useRef<Set<string>>(new Set());
@@ -994,6 +997,24 @@ export default function FeedScreen() {
     ]).start(() => setPubSheetMounted(false));
   }
 
+  function closeErrorSheet() {
+    Animated.parallel([
+      Animated.timing(errorSheetAnimY, { toValue: 500, duration: 260, useNativeDriver: true }),
+      Animated.timing(errorSheetAnimBg, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => { setErrorSheetMounted(false); setFetchErrors([]); });
+  }
+
+  useEffect(() => {
+    if (fetchErrors.length === 0) return;
+    errorSheetAnimY.setValue(500);
+    errorSheetAnimBg.setValue(0);
+    setErrorSheetMounted(true);
+    Animated.parallel([
+      Animated.spring(errorSheetAnimY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 13 }),
+      Animated.timing(errorSheetAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }, [fetchErrors]);
+
   async function handleUnfollowPub() {
     if (!pubSheetData) return;
     const { id } = pubSheetData;
@@ -1352,10 +1373,12 @@ export default function FeedScreen() {
       )}
 
       {/* ── Fetch error sheet ── */}
-      {fetchErrors.length > 0 && (
-        <Modal transparent animationType="slide" visible={fetchErrors.length > 0} onRequestClose={() => setFetchErrors([])} statusBarTranslucent>
-          <TouchableOpacity style={s.sheetBackdrop} onPress={() => setFetchErrors([])} activeOpacity={1} />
-          <View style={s.errorSheet}>
+      {errorSheetMounted && (
+        <Modal transparent animationType="none" visible={errorSheetMounted} onRequestClose={closeErrorSheet} statusBarTranslucent>
+          <Animated.View style={[StyleSheet.absoluteFill, { opacity: errorSheetAnimBg }]}>
+            <TouchableOpacity style={[StyleSheet.absoluteFill, s.sheetBackdrop]} onPress={closeErrorSheet} activeOpacity={1} />
+          </Animated.View>
+          <Animated.View style={[s.errorSheet, { transform: [{ translateY: errorSheetAnimY }] }]}>
             <View style={s.sheetHandle} />
             <View style={s.errorSheetHeader}>
               <View style={[s.errorSheetIconWrap, { backgroundColor: colors.flame + '20' }]}>
@@ -1369,10 +1392,10 @@ export default function FeedScreen() {
                 <Text style={s.errorSheetReason}>{e.reason}</Text>
               </View>
             ))}
-            <TouchableOpacity style={s.errorSheetBtn} onPress={() => setFetchErrors([])} activeOpacity={0.8}>
+            <TouchableOpacity style={s.errorSheetBtn} onPress={closeErrorSheet} activeOpacity={0.8}>
               <Text style={s.errorSheetBtnText}>Got it</Text>
             </TouchableOpacity>
-          </View>
+          </Animated.View>
         </Modal>
       )}
     </View>
@@ -1623,14 +1646,15 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
   continueProgressTrack: { height: 3, backgroundColor: colors.surfaceHigher },
   continueProgressFill: { height: 3 },
 
-  // Error bottom sheet
+  // Error bottom sheet — same structural style as sheet, so Animated.View translateY works
   errorSheet: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     backgroundColor: colors.surface,
-    borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
-    paddingHorizontal: space.md, paddingBottom: 32,
-    shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 16, shadowOffset: { width: 0, height: -4 },
-    elevation: 12,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    borderTopWidth: 1, borderColor: colors.border,
+    paddingHorizontal: space.lg, paddingTop: 12, paddingBottom: 32,
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 20, shadowOffset: { width: 0, height: -4 },
+    elevation: 20,
   },
   errorSheetHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
   errorSheetIconWrap: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
