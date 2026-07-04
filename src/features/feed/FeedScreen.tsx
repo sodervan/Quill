@@ -1540,11 +1540,11 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
   continueTitle: { ...T.label, color: colors.textMuted, paddingHorizontal: space.md, marginBottom: space.sm },
   continueRow: { paddingHorizontal: space.md, gap: 10, paddingBottom: space.sm },
   continueCard: {
-    width: 138, backgroundColor: colors.surface,
+    width: 138, height: 90, backgroundColor: colors.surface,
     borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
     overflow: 'hidden',
   },
-  continueCardBody: { padding: 9, paddingBottom: 8 },
+  continueCardBody: { flex: 1, padding: 9, paddingBottom: 6 },
   continuePubRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 5 },
   continuePubName: { fontSize: 10, fontWeight: '700' as const, flexShrink: 1 },
   continueCardTitle: { fontSize: 12, fontWeight: '600' as const, color: colors.text, lineHeight: 17 },
