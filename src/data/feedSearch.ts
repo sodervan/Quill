@@ -3,6 +3,7 @@ export interface RemoteSource {
   name: string;
   description: string;
   subscribers: number;
+  websiteUrl?: string;
 }
 
 const TOPIC_QUERIES: Record<string, string> = {
@@ -27,11 +28,13 @@ export async function searchFeedly(query: string, count = 12): Promise<RemoteSou
       .map((r: any): RemoteSource | null => {
         const feedUrl = String(r.feedId ?? '').replace(/^feed\//, '');
         if (!feedUrl.startsWith('http')) return null;
+        const websiteRaw = String(r.website ?? '').trim();
         return {
           feedUrl,
-          name: String(r.title ?? r.website ?? feedUrl).slice(0, 60),
+          name: String(r.title ?? websiteRaw ?? feedUrl).slice(0, 60),
           description: String(r.description ?? '').slice(0, 200),
           subscribers: Number(r.subscribers ?? 0),
+          websiteUrl: websiteRaw.startsWith('http') ? websiteRaw : undefined,
         };
       })
       .filter(Boolean) as RemoteSource[];

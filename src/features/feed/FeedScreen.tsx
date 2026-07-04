@@ -484,6 +484,9 @@ export default function FeedScreen() {
   // Progress for all displayed articles — refreshed as one batch query when displayed changes
   const [progressMap, setProgressMap] = useState<Map<string, number>>(new Map());
 
+  // Errors surfaced after a pull-to-refresh
+  const [fetchErrors, setFetchErrors] = useState<{ name: string; reason: string }[]>([]);
+
   // Hidden articles — ref keeps applyFilter stable (no stale closure on refresh)
   const hiddenRef = useRef<Set<string>>(new Set());
   const [hidden, setHiddenRaw] = useState<Set<string>>(new Set());
@@ -582,52 +585,78 @@ export default function FeedScreen() {
     setRemoteMetaMap(rMap);
 
     if (fromNetwork) {
-      // reuse remoteSrcList already fetched above
       const remoteById = new Map(remoteSrcList.map((r) => [r.id, r]));
       const nextMap = new Map<string, string>();
-      await Promise.all(ids.map(async (pubId) => {
+      const collectedErrors: { name: string; reason: string }[] = [];
+
+      // When a single pub is active, only refresh that one; otherwise refresh all
+      const idsToFetch = activeFilter ? [activeFilter] : ids;
+
+      await Promise.all(idsToFetch.map(async (pubId) => {
         const pub = PUBLICATIONS.find((p) => p.id === pubId);
         const remote = remoteById.get(pubId);
         const feedUrl = pub?.feedUrl ?? remote?.feed_url;
         if (!feedUrl) return;
+        // Use the stored website_url (from Feedly) as the blog scrape target when available,
+        // falling back to deriveBlogUrl for curated pubs or pubs followed before v10.
+        const blogUrl = remote?.website_url ?? deriveBlogUrl(feedUrl);
+        let rssOk = false;
         try {
           const { items, nextUrl } = await fetchFeedPage(feedUrl);
           await upsertArticles(items.map((item) => feedItemToRow(item, pubId)));
+          rssOk = true;
           let paginationUrl = nextUrl ?? null;
 
-          // RSS returned few articles and has no next link — try scraping the blog page
-          // Threshold 25: covers feeds returning 10–24 items/page (YC=15, Naval=10, typical=20)
-          if (items.length < 25 && !nextUrl) {
-            const blogUrl = deriveBlogUrl(feedUrl);
-            if (blogUrl) {
-              try {
-                const { items: scraped, nextUrl: scrapedNext } = await scrapeForArticles(blogUrl);
-                if (scraped.length > 0) {
-                  await upsertArticles(scraped.map((item) => feedItemToRow(item, pubId)));
-                }
-                if (scrapedNext) paginationUrl = scrapedNext;
-              } catch {}
-            }
+          if (items.length < 25 && !nextUrl && blogUrl) {
+            try {
+              const { items: scraped, nextUrl: scrapedNext } = await scrapeForArticles(blogUrl);
+              if (scraped.length > 0) {
+                await upsertArticles(scraped.map((item) => feedItemToRow(item, pubId)));
+              }
+              if (scrapedNext) paginationUrl = scrapedNext;
+            } catch {}
           }
 
           if (paginationUrl) nextMap.set(pubId, paginationUrl);
-        } catch {
-          // RSS fetch completely failed — try scraping the blog as sole source of articles
-          const blogUrl = deriveBlogUrl(feedUrl);
+        } catch (e: any) {
           if (blogUrl) {
             try {
               const { items: scraped, nextUrl: scrapedNext } = await scrapeForArticles(blogUrl);
               if (scraped.length > 0) {
                 await upsertArticles(scraped.map((item) => feedItemToRow(item, pubId)));
+                rssOk = true;
                 if (scrapedNext) nextMap.set(pubId, scrapedNext);
               }
             } catch {}
           }
+          if (!rssOk) {
+            const pubName = pub?.name ?? remote?.name ?? pubId;
+            const msg = e?.message ?? '';
+            const reason = msg.includes('abort') || msg.includes('timeout')
+              ? 'Timed out'
+              : /40[34]|429/.test(msg)
+              ? 'Server refused'
+              : 'Network error';
+            collectedErrors.push({ name: pubName, reason });
+          }
         }
       }));
-      setNextUrlMap(nextMap);
 
-      // For every pub with articles but no RSS pagination, derive a blog URL for lazy scraping
+      // Merge pagination map: for single-pub refresh keep other pubs' entries intact
+      if (activeFilter) {
+        setNextUrlMap((prev) => {
+          const updated = new Map(prev);
+          for (const [k, v] of nextMap) updated.set(k, v);
+          if (!nextMap.has(activeFilter)) updated.delete(activeFilter);
+          return updated;
+        });
+      } else {
+        setNextUrlMap(nextMap);
+      }
+
+      if (collectedErrors.length > 0) setFetchErrors(collectedErrors);
+
+      // Derive lazy-scrape URLs for pubs without RSS pagination
       const fMap = new Map<string, string>();
       for (const pubId of ids) {
         if (nextMap.has(pubId)) continue;
@@ -635,8 +664,8 @@ export default function FeedScreen() {
         const remote = remoteById.get(pubId);
         const feedUrl = pub?.feedUrl ?? remote?.feed_url;
         if (!feedUrl) continue;
-        const blogUrl = deriveBlogUrl(feedUrl);
-        if (blogUrl) fMap.set(pubId, blogUrl);
+        const bUrl = remote?.website_url ?? deriveBlogUrl(feedUrl);
+        if (bUrl) fMap.set(pubId, bUrl);
       }
       setScrapeUrlMap(fMap);
     }
@@ -1321,6 +1350,31 @@ export default function FeedScreen() {
           </Animated.View>
         </Modal>
       )}
+
+      {/* ── Fetch error sheet ── */}
+      {fetchErrors.length > 0 && (
+        <Modal transparent animationType="slide" visible={fetchErrors.length > 0} onRequestClose={() => setFetchErrors([])} statusBarTranslucent>
+          <TouchableOpacity style={s.sheetBackdrop} onPress={() => setFetchErrors([])} activeOpacity={1} />
+          <View style={s.errorSheet}>
+            <View style={s.sheetHandle} />
+            <View style={s.errorSheetHeader}>
+              <View style={[s.errorSheetIconWrap, { backgroundColor: colors.flame + '20' }]}>
+                <Ionicons name="wifi-outline" size={20} color={colors.flame} />
+              </View>
+              <Text style={s.errorSheetTitle}>Some sources didn't load</Text>
+            </View>
+            {fetchErrors.map((e, i) => (
+              <View key={i} style={s.errorSheetRow}>
+                <Text style={s.errorSheetName} numberOfLines={1}>{e.name}</Text>
+                <Text style={s.errorSheetReason}>{e.reason}</Text>
+              </View>
+            ))}
+            <TouchableOpacity style={s.errorSheetBtn} onPress={() => setFetchErrors([])} activeOpacity={0.8}>
+              <Text style={s.errorSheetBtnText}>Got it</Text>
+            </TouchableOpacity>
+          </View>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -1567,4 +1621,28 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
   continueCardTitle: { fontSize: 12, fontWeight: '600' as const, color: colors.text, lineHeight: 17 },
   continueProgressTrack: { height: 3, backgroundColor: colors.surfaceHigher },
   continueProgressFill: { height: 3 },
+
+  // Error bottom sheet
+  errorSheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
+    paddingHorizontal: space.md, paddingBottom: 32,
+    shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 16, shadowOffset: { width: 0, height: -4 },
+    elevation: 12,
+  },
+  errorSheetHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
+  errorSheetIconWrap: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  errorSheetTitle: { ...T.h2, color: colors.text, flex: 1 },
+  errorSheetRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  errorSheetName: { ...T.body, color: colors.text, flex: 1, marginRight: 12 },
+  errorSheetReason: { ...T.caption, color: colors.textMuted },
+  errorSheetBtn: {
+    marginTop: 20, paddingVertical: 14, borderRadius: radius.md,
+    backgroundColor: colors.accent, alignItems: 'center',
+  },
+  errorSheetBtnText: { ...T.body, color: colors.bg, fontWeight: '700' },
 }); }

@@ -122,7 +122,12 @@ export async function initDb(): Promise<void> {
     try { await db.execAsync(`ALTER TABLE daily_log ADD COLUMN pages_read INTEGER NOT NULL DEFAULT 0`); } catch {}
   }
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '9')`);
+  // v10: add website_url to remote_sources for Feedburner/redirect feed fallback scraping
+  if (verNum < 10) {
+    try { await db.execAsync(`ALTER TABLE remote_sources ADD COLUMN website_url TEXT`); } catch {}
+  }
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '10')`);
 }
 
 // --- Settings helpers ---
@@ -503,6 +508,7 @@ export interface RemoteSourceRow {
   description: string;
   color: string;
   added_at: number;
+  website_url?: string | null;
 }
 
 // In-memory cache so card renders can look up remote pub metadata synchronously.
@@ -519,9 +525,9 @@ export function getRemoteMetaSync(id: string): { name: string; color: string; fe
 export async function upsertRemoteSource(src: RemoteSourceRow): Promise<void> {
   const db = getDb();
   await db.runAsync(
-    `INSERT OR REPLACE INTO remote_sources (id, name, feed_url, description, color, added_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [src.id, src.name, src.feed_url, src.description, src.color, src.added_at],
+    `INSERT OR REPLACE INTO remote_sources (id, name, feed_url, description, color, added_at, website_url)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [src.id, src.name, src.feed_url, src.description, src.color, src.added_at, src.website_url ?? null],
   );
   cacheRemoteMeta(src.id, src.name, src.color, src.feed_url);
   // Persist metadata to Firestore so remote follows survive reinstall

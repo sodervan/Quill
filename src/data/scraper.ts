@@ -16,15 +16,16 @@ const NEXT_TEXT = /^\s*(next(\s+page)?|older(\s+posts?)?|→|»|›)\s*$/i;
 export function deriveBlogUrl(feedUrl: string): string | null {
   try {
     const u = new URL(feedUrl);
-    // Strip trailing feed segment from path, fall back to root
+    // Redirect/aggregator services — can't derive the real blog URL
+    if (/feedburner\.com|feedblitz\.com|feeds2?\./i.test(u.hostname)) return null;
+    // Strip common feed file/path endings, including filename variants like rss.html, feed.php
     const path = u.pathname
-      .replace(/\/(feed|rss|atom)(\.xml|\.rss|\.json)?\/?$/i, '')
+      .replace(/\/(feed|rss|atom|index)(\.xml|\.rss|\.json|\.html|\.php|\.asp)?\/?$/i, '')
       || '/';
     const blogUrl = new URL(path, u.origin).href;
-    // Don't return same URL (feed is already at root and stripping did nothing useful)
-    return blogUrl === feedUrl || blogUrl === u.origin + '/' + feedUrl.split('/').pop()
-      ? null
-      : blogUrl;
+    // Nothing useful was stripped — same URL or effectively the same filename
+    if (blogUrl === feedUrl || blogUrl === u.origin + '/' + feedUrl.split('/').pop()) return null;
+    return blogUrl;
   } catch { return null; }
 }
 

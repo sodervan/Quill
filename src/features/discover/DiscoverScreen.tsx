@@ -139,6 +139,7 @@ export default function DiscoverScreen() {
       const row: RemoteSourceRow = {
         id, name: src.name, feed_url: src.feedUrl,
         description: src.description, color: pickColor(src.feedUrl), added_at: Date.now(),
+        website_url: src.websiteUrl ?? null,
       };
       await upsertRemoteSource(row);
       await followPublication(id);
