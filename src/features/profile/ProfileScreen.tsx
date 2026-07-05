@@ -12,6 +12,7 @@ import {
   computeStreak, getTodayPages, getDailyGoal, setDailyGoal,
   getFollowedIds, setSetting, getDailyLogHistory,
 } from '../../data/db';
+import { getAllBooks } from '../../data/books';
 import { auth } from '../../lib/firebase';
 import { type as T, space, radius, shadow } from '../../theme';
 import { useColors } from '../../theme/ThemeContext';
@@ -120,6 +121,9 @@ export default function ProfileScreen() {
   const [goal, setGoal] = useState(5);
   const [followedCount, setFollowedCount] = useState(0);
   const [history, setHistory] = useState<{ date: string; pages: number }[]>([]);
+  const [booksFinished, setBooksFinished] = useState(0);
+  const [booksReading, setBooksReading] = useState(0);
+  const [totalBookPages, setTotalBookPages] = useState(0);
 
   const userEmail = auth.currentUser?.email ?? null;
 
@@ -127,13 +131,16 @@ export default function ProfileScreen() {
     useCallback(() => {
       let active = true;
       (async () => {
-        const [str, p, g, f, hist] = await Promise.all([
+        const [str, p, g, f, hist, bookList] = await Promise.all([
           computeStreak(), getTodayPages(), getDailyGoal(), getFollowedIds(),
-          getDailyLogHistory(WEEKS * 7),
+          getDailyLogHistory(WEEKS * 7), getAllBooks(),
         ]);
         if (active) {
           setStreak(str); setTodayPages(p); setGoal(g); setFollowedCount(f.length);
           setHistory(hist);
+          setBooksFinished(bookList.filter((b) => b.total_pages > 0 && b.current_page >= b.total_pages).length);
+          setBooksReading(bookList.filter((b) => b.current_page > 0 && !(b.total_pages > 0 && b.current_page >= b.total_pages)).length);
+          setTotalBookPages(bookList.reduce((acc, b) => acc + (b.current_page || 0), 0));
         }
       })();
       return () => { active = false; };
@@ -282,18 +289,21 @@ export default function ProfileScreen() {
                 </TouchableOpacity>
               </View>
             </View>
-            <Text style={s.goalHint}>Finishing an article counts as 1 page. Page-flip mode tracks each page individually.</Text>
+            <Text style={s.goalHint}>Finishing an article and each page you read in a book both count toward your daily goal.</Text>
           </View>
         </View>
 
-        {/* Stats row */}
+        {/* Stats */}
         <View style={s.section}>
           <Text style={s.sectionTitle}>Reading Stats</Text>
-          <View style={s.statsRow}>
+
+          {/* Articles row */}
+          <Text style={s.statsSubLabel}>Articles</Text>
+          <View style={[s.statsRow, { marginBottom: 10 }]}>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="flame" size={24} color={colors.flame} />
               <Text style={s.statNum}>{streak}</Text>
-              <Text style={s.statLabel}>Streak</Text>
+              <Text style={s.statLabel}>Day streak</Text>
             </View>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="book-outline" size={24} color={colors.accent} />
@@ -301,9 +311,33 @@ export default function ProfileScreen() {
               <Text style={s.statLabel}>Pages today</Text>
             </View>
             <View style={[s.card, s.statCard]}>
-              <Ionicons name="library-outline" size={24} color={colors.success} />
+              <Ionicons name="compass-outline" size={24} color={colors.success} />
               <Text style={s.statNum}>{followedCount}</Text>
               <Text style={s.statLabel}>Sources</Text>
+            </View>
+          </View>
+
+          {/* Books row */}
+          <Text style={s.statsSubLabel}>Books</Text>
+          <View style={s.statsRow}>
+            <View style={[s.card, s.statCard]}>
+              <Ionicons name="checkmark-circle-outline" size={24} color={colors.success} />
+              <Text style={s.statNum}>{booksFinished}</Text>
+              <Text style={s.statLabel}>Finished</Text>
+            </View>
+            <View style={[s.card, s.statCard]}>
+              <Ionicons name="library-outline" size={24} color={colors.accent} />
+              <Text style={s.statNum}>{booksReading}</Text>
+              <Text style={s.statLabel}>Reading</Text>
+            </View>
+            <View style={[s.card, s.statCard]}>
+              <Ionicons name="reader-outline" size={24} color={colors.flame} />
+              <Text style={s.statNum}>
+                {totalBookPages >= 1000
+                  ? `${(totalBookPages / 1000).toFixed(1)}k`
+                  : totalBookPages}
+              </Text>
+              <Text style={s.statLabel}>Pages read</Text>
             </View>
           </View>
         </View>
@@ -314,6 +348,10 @@ export default function ProfileScreen() {
           <View style={s.card}>
             <TouchableOpacity onPress={() => nav.navigate('Highlights')}>
               <SettingRow icon="color-wand-outline" label="My Highlights" right={<Ionicons name="chevron-forward" size={16} color={colors.textMuted} />} />
+            </TouchableOpacity>
+            <View style={s.divider} />
+            <TouchableOpacity onPress={() => nav.navigate('History')}>
+              <SettingRow icon="time-outline" label="Reading History" right={<Ionicons name="chevron-forward" size={16} color={colors.textMuted} />} />
             </TouchableOpacity>
             <View style={s.divider} />
             <SettingRow
@@ -411,6 +449,7 @@ function createProfileStyles(colors: ReturnType<typeof useColors>) { return Styl
   },
   goalHint: { ...T.caption, color: colors.textMuted, lineHeight: 18 },
   statsRow: { flexDirection: 'row', gap: 10 },
+  statsSubLabel: { ...T.caption, color: colors.textMuted, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6, marginTop: 4 },
   statCard: { flex: 1, alignItems: 'center', paddingVertical: space.md },
   statNum: { fontSize: 28, fontWeight: '800', color: colors.text, marginTop: 6, marginBottom: 2 },
   statLabel: { ...T.caption, color: colors.textMuted },

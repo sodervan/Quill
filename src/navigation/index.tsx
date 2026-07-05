@@ -19,17 +19,23 @@ import ReaderScreen from '../features/reader/ReaderScreen';
 import OnboardingScreen from '../features/onboarding/OnboardingScreen';
 import AuthScreen from '../features/auth/AuthScreen';
 import HighlightsScreen from '../features/highlights/HighlightsScreen';
+import BookshelfScreen from '../features/books/BookshelfScreen';
+import BookReaderScreen from '../features/books/BookReaderScreen';
+import HistoryScreen from '../features/history/HistoryScreen';
 
 export type RootStackParamList = {
   Tabs: undefined;
   Reader: { articleId: string; publicationId: string };
   Highlights: undefined;
+  History: undefined;
+  BookReader: { bookId: string; initialPage?: number };
 };
 
 export type TabParamList = {
   Feed: undefined;
   Discover: undefined;
   Library: undefined;
+  Books: undefined;
   Profile: undefined;
 };
 
@@ -39,6 +45,7 @@ const TAB_ICONS: Record<string, { active: IoniconsName; inactive: IoniconsName }
   Feed:     { active: 'book',          inactive: 'book-outline' },
   Discover: { active: 'compass',       inactive: 'compass-outline' },
   Library:  { active: 'bookmark',      inactive: 'bookmark-outline' },
+  Books:    { active: 'library',       inactive: 'library-outline' },
   Profile:  { active: 'person-circle', inactive: 'person-circle-outline' },
 };
 
@@ -71,6 +78,7 @@ function Tabs() {
       <Tab.Screen name="Feed" component={FeedScreen} />
       <Tab.Screen name="Discover" component={DiscoverScreen} />
       <Tab.Screen name="Library" component={LibraryScreen} />
+      <Tab.Screen name="Books" component={BookshelfScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>
   );
@@ -164,6 +172,8 @@ export default function Navigation() {
         <Stack.Screen name="Tabs" component={Tabs} />
         <Stack.Screen name="Reader" component={ReaderScreen} />
         <Stack.Screen name="Highlights" component={HighlightsScreen} />
+        <Stack.Screen name="History" component={HistoryScreen} />
+        <Stack.Screen name="BookReader" component={BookReaderScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

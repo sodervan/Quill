@@ -97,6 +97,30 @@ export async function initDb(): Promise<void> {
       color TEXT NOT NULL DEFAULT '#C8AA6E',
       created_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS books (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      author TEXT NOT NULL DEFAULT '',
+      file_uri TEXT NOT NULL,
+      format TEXT NOT NULL,
+      cover_uri TEXT,
+      added_at INTEGER NOT NULL,
+      last_read_at INTEGER,
+      current_page INTEGER NOT NULL DEFAULT 0,
+      total_pages INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS book_highlights (
+      id TEXT PRIMARY KEY,
+      book_id TEXT NOT NULL,
+      page INTEGER NOT NULL DEFAULT 0,
+      cfi TEXT,
+      selected_text TEXT NOT NULL,
+      color TEXT NOT NULL DEFAULT '#C8AA6E',
+      note TEXT,
+      created_at INTEGER NOT NULL
+    );
   `);
 
   await db.runAsync(`INSERT OR IGNORE INTO settings (key, value) VALUES ('daily_goal', '1')`);
@@ -127,7 +151,10 @@ export async function initDb(): Promise<void> {
     try { await db.execAsync(`ALTER TABLE remote_sources ADD COLUMN website_url TEXT`); } catch {}
   }
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '10')`);
+  // v11: books + book_highlights tables (handled by CREATE TABLE IF NOT EXISTS above)
+  // Nothing extra needed — tables are created fresh or already exist.
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '11')`);
 }
 
 // --- Settings helpers ---
@@ -354,11 +381,12 @@ async function incrementDailyLog(): Promise<void> {
      ON CONFLICT(date) DO UPDATE SET qualifying_reads = qualifying_reads + 1`,
     [key],
   );
-  const row = await db.getFirstAsync<{ qualifying_reads: number }>(
-    `SELECT qualifying_reads FROM daily_log WHERE date = ?`, [key],
+  // Read the FULL row so pages_read isn't overwritten to 0 in Firestore
+  const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number }>(
+    `SELECT qualifying_reads, pages_read FROM daily_log WHERE date = ?`, [key],
   );
   if (row) {
-    import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads)).catch(() => {});
+    import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads, row.pages_read ?? 0)).catch(() => {});
   }
 }
 
@@ -418,7 +446,9 @@ export async function getRecentlyRead(): Promise<ArticleRow[]> {
 // --- Streak ---
 
 function todayKey(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  // Use local calendar date, not UTC — avoids off-by-one for non-UTC users
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 export async function getTodayReads(): Promise<number> {
@@ -427,6 +457,23 @@ export async function getTodayReads(): Promise<number> {
     `SELECT qualifying_reads FROM daily_log WHERE date = ?`, [todayKey()],
   );
   return row?.qualifying_reads ?? 0;
+}
+
+export async function logBookPages(delta: number): Promise<void> {
+  if (delta <= 0) return;
+  const db = getDb();
+  const key = todayKey();
+  await db.runAsync(
+    `INSERT INTO daily_log (date, qualifying_reads, pages_read) VALUES (?, 0, ?)
+     ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + excluded.pages_read`,
+    [key, delta],
+  );
+  const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number }>(
+    `SELECT qualifying_reads, pages_read FROM daily_log WHERE date = ?`, [key],
+  );
+  if (row) {
+    import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads, row.pages_read)).catch(() => {});
+  }
 }
 
 export async function getTodayPages(): Promise<number> {
@@ -585,6 +632,32 @@ export async function getAllHighlights(): Promise<(HighlightRow & { article_titl
      LEFT JOIN articles a ON h.article_id = a.id
      ORDER BY h.created_at DESC`,
   );
+}
+
+export interface ReadHistoryRow {
+  article_id: string;
+  title: string | null;
+  link: string | null;
+  publication_id: string | null;
+  pages_read: number;
+  total_pages: number;
+  scroll_depth: number;
+  completed: number;
+  last_read_at: number;
+}
+
+export async function getReadHistory(): Promise<ReadHistoryRow[]> {
+  const db = getDb();
+  return db.getAllAsync<ReadHistoryRow>(`
+    SELECT
+      rp.article_id, a.title, a.link, a.publication_id,
+      rp.pages_read, rp.total_pages, rp.scroll_depth,
+      rp.completed, rp.last_read_at
+    FROM reading_progress rp
+    LEFT JOIN articles a ON rp.article_id = a.id
+    ORDER BY rp.last_read_at DESC
+    LIMIT 200
+  `);
 }
 
 export async function deleteHighlight(id: number): Promise<void> {

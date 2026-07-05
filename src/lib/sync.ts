@@ -3,6 +3,7 @@ import {
   doc, setDoc, deleteDoc, getDocs, getDoc, collection, writeBatch,
 } from 'firebase/firestore';
 import type { RemoteSourceRow, ArticleRow, HighlightRow } from '../data/db';
+import type { BookRow, BookHighlightRow } from '../data/books';
 
 function uid(): string | null {
   return auth.currentUser?.uid ?? null;
@@ -142,6 +143,56 @@ export async function syncDeleteHighlight(articleId: string, createdAt: number):
   } catch {}
 }
 
+export async function syncBook(book: BookRow, coverUrl?: string): Promise<void> {
+  const userId = uid();
+  if (!userId) return;
+  try {
+    await setDoc(doc(db, 'users', userId, 'books', book.id), {
+      title: book.title, author: book.author, format: book.format,
+      // cover_uri is a local path — store the original download URL instead
+      cover_url: coverUrl ?? null,
+      added_at: book.added_at, last_read_at: book.last_read_at ?? null,
+      current_page: book.current_page, total_pages: book.total_pages,
+    });
+  } catch {}
+}
+
+export async function syncBookProgress(
+  bookId: string, page: number, totalPages: number,
+): Promise<void> {
+  const userId = uid();
+  if (!userId) return;
+  try {
+    await setDoc(doc(db, 'users', userId, 'books', bookId), {
+      current_page: page, total_pages: totalPages, last_read_at: Date.now(),
+    }, { merge: true });
+  } catch {}
+}
+
+export async function syncDeleteBook(bookId: string): Promise<void> {
+  const userId = uid();
+  if (!userId) return;
+  try { await deleteDoc(doc(db, 'users', userId, 'books', bookId)); } catch {}
+}
+
+export async function syncBookHighlight(h: BookHighlightRow): Promise<void> {
+  const userId = uid();
+  if (!userId) return;
+  try {
+    await setDoc(doc(db, 'users', userId, 'book_highlights', h.id), {
+      book_id: h.book_id, page: h.page, cfi: h.cfi ?? null,
+      selected_text: h.selected_text, color: h.color,
+      note: h.note ?? null, created_at: h.created_at,
+    });
+  } catch {}
+}
+
+export async function syncDeleteBookHighlight(id: string): Promise<void> {
+  const userId = uid();
+  if (!userId) return;
+  try { await deleteDoc(doc(db, 'users', userId, 'book_highlights', id)); } catch {}
+}
+
 // kept for API compat — no Supabase read events in Firebase
 export async function syncReadEvent(
   _articleId: string, _secondsRead: number, _scrollDepth: number, _qualifying: boolean,
@@ -240,6 +291,26 @@ export async function uploadLocalToSupabase(): Promise<void> {
   try {
     const goal = await dbMod.getDailyGoal();
     await setDoc(doc(db, 'users', userId, 'settings', 'daily_goal'), { value: String(goal) });
+  } catch {}
+
+  // Book highlights — individual setDoc calls (IDs are stable strings, not integers)
+  try {
+    const rawDb = dbMod.getDb();
+    const bHighlights = await rawDb.getAllAsync<{
+      id: string; book_id: string; page: number; cfi: string | null;
+      selected_text: string; color: string; note: string | null; created_at: number;
+    }>(`SELECT * FROM book_highlights`);
+    if (bHighlights.length > 0) {
+      const b5 = writeBatch(db);
+      for (const h of bHighlights) {
+        b5.set(doc(db, 'users', userId, 'book_highlights', h.id), {
+          book_id: h.book_id, page: h.page, cfi: h.cfi ?? null,
+          selected_text: h.selected_text, color: h.color,
+          note: h.note ?? null, created_at: h.created_at,
+        });
+      }
+      await b5.commit();
+    }
   } catch {}
 }
 
@@ -356,7 +427,83 @@ export async function restoreFromSupabase(): Promise<void> {
     }
   } catch {}
 
-  // 7. Reading progress
+  // 7. Book metadata + progress
+  //    File stays local — restore metadata/progress so book shows in library.
+  //    For books not on this device, insert a placeholder (file_uri='') so
+  //    the BookshelfScreen shows them with the "file missing" banner.
+  try {
+    const booksMod = await import('../data/books');
+    const snap = await getDocs(collection(db, 'users', userId, 'books'));
+    for (const d of snap.docs) {
+      const b = d.data();
+      const existing = await booksMod.getBookById(d.id);
+      if (existing) {
+        if ((b.current_page ?? 0) > existing.current_page) {
+          const rawDb = dbMod.getDb();
+          await rawDb.runAsync(
+            `UPDATE books SET current_page = ?, total_pages = ?, last_read_at = ? WHERE id = ?`,
+            [b.current_page, b.total_pages, b.last_read_at ?? null, d.id],
+          );
+        }
+        // Re-download cover if cloud has a URL but local cover is gone
+        if (b.cover_url && !existing.cover_uri) {
+          try {
+            const FS = await import('expo-file-system/legacy');
+            const dir = ((FS as any).documentDirectory ?? '') + 'books/covers/';
+            await (FS as any).makeDirectoryAsync(dir, { intermediates: true });
+            const dest = dir + d.id + '_cover.jpg';
+            const res = await (FS as any).downloadAsync(b.cover_url, dest);
+            if (res.status === 200) await booksMod.updateBookCover(d.id, res.uri);
+          } catch {}
+        }
+      } else {
+        // Fresh install — create placeholder row; user re-imports the file
+        await booksMod.upsertBook({
+          id: d.id,
+          title: b.title ?? 'Unknown',
+          author: b.author ?? '',
+          file_uri: '',                              // missing until re-imported
+          format: (b.format ?? 'pdf') as import('../data/books').BookFormat,
+          cover_uri: null,
+          added_at: b.added_at ?? Date.now(),
+          last_read_at: b.last_read_at ?? null,
+          current_page: b.current_page ?? 0,
+          total_pages: b.total_pages ?? 0,
+        });
+        // Attempt to re-download cover from stored URL
+        if (b.cover_url) {
+          try {
+            const FS = await import('expo-file-system/legacy');
+            const dir = ((FS as any).documentDirectory ?? '') + 'books/covers/';
+            await (FS as any).makeDirectoryAsync(dir, { intermediates: true });
+            const dest = dir + d.id + '_cover.jpg';
+            const res = await (FS as any).downloadAsync(b.cover_url, dest);
+            if (res.status === 200) await booksMod.updateBookCover(d.id, res.uri);
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+
+  // 8. Book highlights
+  try {
+    const booksMod = await import('../data/books');
+    const snap = await getDocs(collection(db, 'users', userId, 'book_highlights'));
+    for (const d of snap.docs) {
+      const h = d.data();
+      const rawDb = dbMod.getDb();
+      await rawDb.runAsync(
+        `INSERT OR IGNORE INTO book_highlights
+           (id, book_id, page, cfi, selected_text, color, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [d.id, h.book_id, h.page ?? 0, h.cfi ?? null,
+         h.selected_text, h.color, h.note ?? null, h.created_at],
+      );
+    }
+    void booksMod; // suppress unused warning
+  } catch {}
+
+  // 9. Reading progress
   try {
     const snap = await getDocs(collection(db, 'users', userId, 'reading_progress'));
     const rawDb = dbMod.getDb();
