@@ -162,11 +162,11 @@ const SELECTION_JS = `
 })();
 true;`;
 
-function buildApplyHighlightsJS(items: Array<{ text: string; color: string }>): string {
+function buildApplyHighlightsJS(items: Array<{ id: string; text: string; color: string }>): string {
   const data = JSON.stringify(items);
   return `
 (function(){
-  function applyHL(txt,color){
+  function applyHL(id,txt,color){
     var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
     var node;
     while((node=walker.nextNode())){
@@ -174,6 +174,7 @@ function buildApplyHighlightsJS(items: Array<{ text: string; color: string }>): 
       var idx=v.indexOf(txt);
       if(idx<0)continue;
       var span=document.createElement('span');
+      span.setAttribute('data-hl-id',id);
       span.style.cssText='background:'+color+'55;border-radius:2px;padding:0 1px;';
       var r=document.createRange();
       r.setStart(node,idx);
@@ -183,7 +184,23 @@ function buildApplyHighlightsJS(items: Array<{ text: string; color: string }>): 
     }
   }
   var hs=${data};
-  hs.forEach(function(h){try{applyHL(h.text,h.color);}catch(e){}});
+  hs.forEach(function(h){try{applyHL(h.id,h.text,h.color);}catch(e){}});
+})();true;`;
+}
+
+function buildRemoveHighlightsJS(ids: string[]): string {
+  const data = JSON.stringify(ids);
+  return `
+(function(){
+  var ids=${data};
+  ids.forEach(function(id){
+    var span=document.querySelector('[data-hl-id="'+id+'"]');
+    if(!span)return;
+    var p=span.parentNode;
+    while(span.firstChild)p.insertBefore(span.firstChild,span);
+    p.removeChild(span);
+    p.normalize();
+  });
 })();true;`;
 }
 
@@ -227,9 +244,9 @@ function buildChapterHtml(
   html,body{margin:0;padding:0;background:${bg};}
   body{
     font-family:'Georgia','Times New Roman',serif;
-    font-size:17px;line-height:1.85;color:${fg};
+    font-size:17px;line-height:1.75;color:${fg};
     padding:28px 22px 88px;word-break:break-word;
-    text-align:justify;
+    text-align:left;
   }
   h1,h2,h3,h4{
     line-height:1.3;margin:32px 0 14px;
@@ -280,7 +297,7 @@ export default function EpubReader({
   function injectHighlights(items: BookHighlightRow[]) {
     if (!webViewRef.current || items.length === 0) return;
     webViewRef.current.injectJavaScript(
-      buildApplyHighlightsJS(items.map((h) => ({ text: h.selected_text, color: h.color })))
+      buildApplyHighlightsJS(items.map((h) => ({ id: h.id, text: h.selected_text, color: h.color })))
     );
   }
 
@@ -302,6 +319,16 @@ export default function EpubReader({
       return;
     }
     const forChapter = highlights.filter((h) => h.page === current && h.selected_text);
+    const currentIds = new Set(forChapter.map((h) => h.id));
+
+    // Remove spans for deleted highlights
+    const removedIds = [...appliedHLRef.current].filter((id) => !currentIds.has(id));
+    if (removedIds.length > 0) {
+      removedIds.forEach((id) => appliedHLRef.current.delete(id));
+      webViewRef.current?.injectJavaScript(buildRemoveHighlightsJS(removedIds));
+    }
+
+    // Apply newly added highlights
     const newOnes = forChapter.filter((h) => !appliedHLRef.current.has(h.id));
     if (newOnes.length === 0) return;
     newOnes.forEach((h) => appliedHLRef.current.add(h.id));
