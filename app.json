@@ -29,8 +29,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "48de4ec6-b50e-4801-b3a4-bbe0e39e9008"
+        "projectId": "916970fe-5064-43e3-957c-f7bc608e6d2f"
       }
-    }
+    },
+    "owner": "soderva.n"
   }
 }

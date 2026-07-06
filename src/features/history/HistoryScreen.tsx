@@ -52,6 +52,8 @@ export default function HistoryScreen() {
   const [tab, setTab] = useState<'books' | 'articles'>('books');
   const [books, setBooks] = useState<BookRow[]>([]);
   const [articleHistory, setArticleHistory] = useState<ReadHistoryRow[]>([]);
+  const [bookFilter, setBookFilter] = useState<'reading' | 'completed' | null>(null);
+  const [articleFilter, setArticleFilter] = useState<'progress' | 'completed' | null>(null);
 
   // Action sheet
   const sheetAnimY = useRef(new Animated.Value(500)).current;
@@ -80,8 +82,10 @@ export default function HistoryScreen() {
     .sort((a, b) => (b.last_read_at ?? 0) - (a.last_read_at ?? 0));
 
   const bookSections = [
-    ...(booksReading.length > 0 ? [{ title: 'Currently Reading', data: booksReading }] : []),
-    ...(booksCompleted.length > 0 ? [{ title: 'Completed', data: booksCompleted }] : []),
+    ...(bookFilter !== 'completed' && booksReading.length > 0
+      ? [{ title: 'Currently Reading', data: booksReading }] : []),
+    ...(bookFilter !== 'reading' && booksCompleted.length > 0
+      ? [{ title: 'Completed', data: booksCompleted }] : []),
   ];
 
   // ── Articles ───────────────────────────────────────────────────────────
@@ -91,8 +95,10 @@ export default function HistoryScreen() {
   );
 
   const articleSections = [
-    ...(articlesInProgress.length > 0 ? [{ title: 'In Progress', data: articlesInProgress }] : []),
-    ...(articlesCompleted.length > 0 ? [{ title: 'Completed', data: articlesCompleted }] : []),
+    ...(articleFilter !== 'completed' && articlesInProgress.length > 0
+      ? [{ title: 'In Progress', data: articlesInProgress }] : []),
+    ...(articleFilter !== 'progress' && articlesCompleted.length > 0
+      ? [{ title: 'Completed', data: articlesCompleted }] : []),
   ];
 
   const totalBooks = booksReading.length + booksCompleted.length;
@@ -193,32 +199,48 @@ export default function HistoryScreen() {
         {/* Stats row */}
         {tab === 'books' && totalBooks > 0 && (
           <View style={s.statsRow}>
-            <View style={s.statChip}>
+            <TouchableOpacity
+              style={[s.statChip, bookFilter === 'reading' && s.statChipActive]}
+              onPress={() => setBookFilter((f) => f === 'reading' ? null : 'reading')}
+              activeOpacity={0.75}
+            >
               <View style={[s.statDot, { backgroundColor: colors.accent }]} />
-              <Text style={s.statLabel}>Reading</Text>
+              <Text style={[s.statLabel, bookFilter === 'reading' && { color: colors.accent }]}>Reading</Text>
               <Text style={[s.statCount, { color: colors.accent }]}>{booksReading.length}</Text>
-            </View>
+            </TouchableOpacity>
             <View style={s.statDivider} />
-            <View style={s.statChip}>
+            <TouchableOpacity
+              style={[s.statChip, bookFilter === 'completed' && s.statChipActive]}
+              onPress={() => setBookFilter((f) => f === 'completed' ? null : 'completed')}
+              activeOpacity={0.75}
+            >
               <View style={[s.statDot, { backgroundColor: colors.success }]} />
-              <Text style={s.statLabel}>Completed</Text>
+              <Text style={[s.statLabel, bookFilter === 'completed' && { color: colors.success }]}>Completed</Text>
               <Text style={[s.statCount, { color: colors.success }]}>{booksCompleted.length}</Text>
-            </View>
+            </TouchableOpacity>
           </View>
         )}
         {tab === 'articles' && totalArticles > 0 && (
           <View style={s.statsRow}>
-            <View style={s.statChip}>
+            <TouchableOpacity
+              style={[s.statChip, articleFilter === 'progress' && s.statChipActive]}
+              onPress={() => setArticleFilter((f) => f === 'progress' ? null : 'progress')}
+              activeOpacity={0.75}
+            >
               <View style={[s.statDot, { backgroundColor: colors.accent }]} />
-              <Text style={s.statLabel}>In Progress</Text>
+              <Text style={[s.statLabel, articleFilter === 'progress' && { color: colors.accent }]}>In Progress</Text>
               <Text style={[s.statCount, { color: colors.accent }]}>{articlesInProgress.length}</Text>
-            </View>
+            </TouchableOpacity>
             <View style={s.statDivider} />
-            <View style={s.statChip}>
+            <TouchableOpacity
+              style={[s.statChip, articleFilter === 'completed' && s.statChipActive]}
+              onPress={() => setArticleFilter((f) => f === 'completed' ? null : 'completed')}
+              activeOpacity={0.75}
+            >
               <View style={[s.statDot, { backgroundColor: colors.success }]} />
-              <Text style={s.statLabel}>Completed</Text>
+              <Text style={[s.statLabel, articleFilter === 'completed' && { color: colors.success }]}>Completed</Text>
               <Text style={[s.statCount, { color: colors.success }]}>{articlesCompleted.length}</Text>
-            </View>
+            </TouchableOpacity>
           </View>
         )}
 
@@ -464,7 +486,8 @@ function createStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.
     backgroundColor: colors.surface, borderRadius: radius.lg,
     borderWidth: 1, borderColor: colors.border, padding: 12,
   },
-  statChip: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
+  statChip: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 4, borderRadius: radius.md },
+  statChipActive: { backgroundColor: colors.surfaceHigher },
   statDot: { width: 8, height: 8, borderRadius: 4 },
   statLabel: { ...T.label, color: colors.textMuted },
   statCount: { ...T.label, fontWeight: '700' },
