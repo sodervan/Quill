@@ -17,7 +17,9 @@ export type ReadingTheme = 'default' | 'sepia' | 'night';
 interface Props {
   fileUri: string;
   initialChapter: number;
+  initialScrollOffset?: number;
   onChapterChanged: (chapter: number, total: number) => void;
+  onScrollChanged?: (depth: number) => void;
   onTextSelected: (text: string, chapter: number) => void;
   onAddNote: (chapter: number) => void;
   highlights: BookHighlightRow[];
@@ -159,6 +161,18 @@ const SELECTION_JS = `
   }
   document.addEventListener('mouseup', sendSel);
   document.addEventListener('touchend', sendSel);
+
+  // Throttled scroll depth reporting (0–1)
+  var scrollTimer = null;
+  window.addEventListener('scroll', function() {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(function() {
+      var max = document.documentElement.scrollHeight - window.innerHeight;
+      if (max <= 0) return;
+      var depth = Math.min(1, window.scrollY / max);
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'scroll_depth', depth: depth }));
+    }, 400);
+  }, { passive: true });
 })();
 true;`;
 
@@ -276,7 +290,8 @@ function buildChapterHtml(
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function EpubReader({
-  fileUri, initialChapter, onChapterChanged, onTextSelected,
+  fileUri, initialChapter, initialScrollOffset = 0,
+  onChapterChanged, onScrollChanged, onTextSelected,
   onAddNote, highlights, rawMode = false, readingTheme = 'default',
 }: Props) {
   const colors = useColors();
@@ -289,10 +304,10 @@ export default function EpubReader({
   const isDark = colors.bg === '#090C15';
 
   const webViewRef = useRef<WebView>(null);
-  // Tracks which highlight IDs have already been injected into the current page
   const appliedHLRef = useRef<Set<string>>(new Set());
-  // Tracks previous chapter index to distinguish chapter-change from highlights-change
   const prevCurrentRef = useRef(current);
+  // Only restore scroll offset on the very first load of initialChapter
+  const scrollRestoredRef = useRef(false);
 
   function injectHighlights(items: BookHighlightRow[]) {
     if (!webViewRef.current || items.length === 0) return;
@@ -301,12 +316,30 @@ export default function EpubReader({
     );
   }
 
-  // After the WebView finishes loading the chapter HTML, apply all highlights for it
   function handleLoadEnd() {
     appliedHLRef.current = new Set();
     const forChapter = highlights.filter((h) => h.page === current && h.selected_text);
     forChapter.forEach((h) => appliedHLRef.current.add(h.id));
     injectHighlights(forChapter);
+
+    // Restore scroll position on first load of the initial chapter only
+    if (!scrollRestoredRef.current && current === initialChapter && initialScrollOffset > 0.01) {
+      scrollRestoredRef.current = true;
+      webViewRef.current?.injectJavaScript(`
+        (function(){
+          var tries = 0;
+          function restore() {
+            var max = document.documentElement.scrollHeight - window.innerHeight;
+            if (max > 10) {
+              window.scrollTo(0, ${initialScrollOffset} * max);
+            } else if (tries++ < 8) {
+              setTimeout(restore, 80);
+            }
+          }
+          setTimeout(restore, 120);
+        })();true;
+      `);
+    }
   }
 
   // When highlights or chapter changes:
@@ -378,6 +411,8 @@ export default function EpubReader({
       const msg = JSON.parse(e.nativeEvent.data);
       if (msg.type === 'selection' && msg.text) {
         onTextSelected(msg.text, currentRef.current);
+      } else if (msg.type === 'scroll_depth') {
+        onScrollChanged?.(msg.depth as number);
       }
     } catch {}
   }

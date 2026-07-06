@@ -14,7 +14,7 @@ import { RootStackParamList } from '../../navigation';
 import { type as T, space, radius } from '../../theme';
 import { useColors, useTheme } from '../../theme/ThemeContext';
 import {
-  getBookById, updateBookProgress, upsertBookHighlight,
+  getBookById, updateBookProgress, updateBookScrollOffset, upsertBookHighlight,
   getBookHighlights, deleteBookHighlight, updateBookHighlightNote,
   type BookRow, type BookHighlightRow,
 } from '../../data/books';
@@ -55,6 +55,16 @@ const TXT_SELECTION_JS = `
   function sendSel(){var s=window.getSelection();var t=(s?s.toString().trim():'')||cachedSel;if(t.length>2){window.ReactNativeWebView.postMessage(JSON.stringify({type:'selection',text:t}));hint.style.display='none';cachedSel='';}}
   document.addEventListener('mouseup',sendSel);
   document.addEventListener('touchend',sendSel);
+  var scrollTimer=null;
+  window.addEventListener('scroll',function(){
+    clearTimeout(scrollTimer);
+    scrollTimer=setTimeout(function(){
+      var max=document.documentElement.scrollHeight-window.innerHeight;
+      if(max<=0)return;
+      var depth=Math.min(1,window.scrollY/max);
+      window.ReactNativeWebView.postMessage(JSON.stringify({type:'scroll_depth',depth:depth}));
+    },400);
+  },{passive:true});
 })();
 true;`;
 
@@ -65,18 +75,21 @@ function buildTxtApplyHighlightsJS(items: Array<{ text: string; color: string }>
 
 function TxtReader({
   fileUri, onReady, isDark, rawMode, readingTheme,
-  onTextSelected, highlights, currentPage,
+  initialScrollOffset = 0, onTextSelected, onScrollChanged, highlights, currentPage,
 }: {
   fileUri: string; onReady: (total: number) => void;
   isDark: boolean;
   rawMode: boolean; readingTheme: ReadingTheme;
+  initialScrollOffset?: number;
   onTextSelected: (text: string) => void;
+  onScrollChanged?: (depth: number) => void;
   highlights: BookHighlightRow[];
   currentPage: number;
 }) {
   const [html, setHtml] = useState('');
   const txtWebViewRef = React.useRef<WebView>(null);
   const appliedHLRef = React.useRef<Set<string>>(new Set());
+  const scrollRestoredRef = React.useRef(false);
 
   useEffect(() => {
     FileSystem.readAsStringAsync(fileUri)
@@ -115,15 +128,29 @@ function TxtReader({
       .catch(() => setHtml('<p style="color:#888;padding:32px">Could not read file.</p>'));
   }, [fileUri, rawMode, isDark, readingTheme]);
 
-  // After page loads: apply all highlights for this page
   function handleLoadEnd() {
     appliedHLRef.current = new Set();
     const forPage = highlights.filter((h) => h.page === currentPage && h.selected_text);
-    if (!txtWebViewRef.current || forPage.length === 0) return;
-    forPage.forEach((h) => appliedHLRef.current.add(h.id));
-    txtWebViewRef.current.injectJavaScript(
-      buildTxtApplyHighlightsJS(forPage.map((h) => ({ text: h.selected_text, color: h.color })))
-    );
+    if (txtWebViewRef.current && forPage.length > 0) {
+      forPage.forEach((h) => appliedHLRef.current.add(h.id));
+      txtWebViewRef.current.injectJavaScript(
+        buildTxtApplyHighlightsJS(forPage.map((h) => ({ text: h.selected_text, color: h.color })))
+      );
+    }
+    if (!scrollRestoredRef.current && initialScrollOffset > 0.01) {
+      scrollRestoredRef.current = true;
+      txtWebViewRef.current?.injectJavaScript(`
+        (function(){
+          var tries=0;
+          function restore(){
+            var max=document.documentElement.scrollHeight-window.innerHeight;
+            if(max>10){window.scrollTo(0,${initialScrollOffset}*max);}
+            else if(tries++<8){setTimeout(restore,80);}
+          }
+          setTimeout(restore,120);
+        })();true;
+      `);
+    }
   }
 
   // When highlights change: inject only newly added ones
@@ -148,6 +175,7 @@ function TxtReader({
         try {
           const m = JSON.parse(e.nativeEvent.data);
           if (m.type === 'selection') onTextSelected(m.text);
+          else if (m.type === 'scroll_depth') onScrollChanged?.(m.depth as number);
         } catch {}
       }}
       scrollEnabled showsVerticalScrollIndicator={false} overScrollMode="never"
@@ -170,6 +198,7 @@ export default function BookReaderScreen({ route, navigation }: Props) {
   const [rawMode, setRawMode] = useState(false);
   const [readingTheme, setReadingTheme] = useState<ReadingTheme>('default');
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollSaveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const THEMES: ReadingTheme[] = ['default', 'sepia', 'night'];
   const THEME_META: Record<ReadingTheme, { icon: string; color: string; label: string }> = {
@@ -219,7 +248,6 @@ export default function BookReaderScreen({ route, navigation }: Props) {
     });
   }, [bookId]);
 
-  // Debounced progress save
   function handleProgressChange(page: number, total: number) {
     setCurrentPage(page);
     setTotalPages(total);
@@ -227,6 +255,16 @@ export default function BookReaderScreen({ route, navigation }: Props) {
     saveTimeout.current = setTimeout(() => {
       updateBookProgress(bookId, page, total).catch(() => {});
     }, 1500);
+    // Reset scroll offset when chapter changes — new chapter starts at top
+    if (scrollSaveTimeout.current) clearTimeout(scrollSaveTimeout.current);
+    updateBookScrollOffset(bookId, 0).catch(() => {});
+  }
+
+  function handleScrollChanged(depth: number) {
+    if (scrollSaveTimeout.current) clearTimeout(scrollSaveTimeout.current);
+    scrollSaveTimeout.current = setTimeout(() => {
+      updateBookScrollOffset(bookId, depth).catch(() => {});
+    }, 1000);
   }
 
   // ── Sheet: open/close ──
@@ -402,7 +440,9 @@ export default function BookReaderScreen({ route, navigation }: Props) {
         <EpubReader
           fileUri={book.file_uri}
           initialChapter={(initialPage ?? book.current_page) || 0}
+          initialScrollOffset={initialPage != null ? 0 : (book.scroll_offset ?? 0)}
           onChapterChanged={(ch, total) => handleProgressChange(ch, total)}
+          onScrollChanged={handleScrollChanged}
           onTextSelected={handleTextSelected}
           onAddNote={handleAddNote}
           highlights={highlights}
@@ -416,8 +456,10 @@ export default function BookReaderScreen({ route, navigation }: Props) {
           isDark={isDark}
           rawMode={rawMode}
           readingTheme={readingTheme}
+          initialScrollOffset={book.scroll_offset ?? 0}
           onReady={(total) => setTotalPages(total)}
           onTextSelected={(text) => handleTextSelected(text, currentPage)}
+          onScrollChanged={handleScrollChanged}
           highlights={highlights}
           currentPage={currentPage}
         />

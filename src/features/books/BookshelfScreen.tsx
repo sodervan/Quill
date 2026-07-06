@@ -270,8 +270,9 @@ export default function BookshelfScreen() {
         cover_uri: existing?.cover_uri ?? null,   // keep restored cover
         added_at: existing?.added_at ?? Date.now(),
         last_read_at: existing?.last_read_at ?? null,
-        current_page: existing?.current_page ?? 0, // keep restored progress
+        current_page: existing?.current_page ?? 0,
         total_pages: existing?.total_pages ?? 0,
+        scroll_offset: existing?.scroll_offset ?? 0,
       };
       await upsertBook(book);
       syncBook(book).catch(() => {});

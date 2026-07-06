@@ -68,6 +68,7 @@ export interface BookRow {
   last_read_at: number | null;
   current_page: number;
   total_pages: number;
+  scroll_offset: number;
 }
 
 export interface BookHighlightRow {
@@ -85,11 +86,11 @@ export async function upsertBook(book: BookRow): Promise<void> {
   const db = getDb();
   await db.runAsync(
     `INSERT OR REPLACE INTO books
-       (id, title, author, file_uri, format, cover_uri, added_at, last_read_at, current_page, total_pages)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, title, author, file_uri, format, cover_uri, added_at, last_read_at, current_page, total_pages, scroll_offset)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [book.id, book.title, book.author, book.file_uri, book.format,
      book.cover_uri ?? null, book.added_at, book.last_read_at ?? null,
-     book.current_page, book.total_pages],
+     book.current_page, book.total_pages, book.scroll_offset ?? 0],
   );
 }
 
@@ -119,6 +120,12 @@ export async function updateBookProgress(
   );
   if (delta > 0) logBookPages(delta).catch(() => {});
   import('../lib/sync').then((m) => m.syncBookProgress(id, page, totalPages)).catch(() => {});
+}
+
+export async function updateBookScrollOffset(id: string, offset: number): Promise<void> {
+  const db = getDb();
+  await db.runAsync(`UPDATE books SET scroll_offset = ? WHERE id = ?`, [offset, id]);
+  import('../lib/sync').then((m) => m.syncBookScrollOffset(id, offset)).catch(() => {});
 }
 
 export async function updateBookCover(id: string, coverUri: string): Promise<void> {

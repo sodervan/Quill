@@ -165,6 +165,17 @@ export async function syncBookProgress(
   try {
     await setDoc(doc(db, 'users', userId, 'books', bookId), {
       current_page: page, total_pages: totalPages, last_read_at: Date.now(),
+      scroll_offset: 0,
+    }, { merge: true });
+  } catch {}
+}
+
+export async function syncBookScrollOffset(bookId: string, offset: number): Promise<void> {
+  const userId = uid();
+  if (!userId) return;
+  try {
+    await setDoc(doc(db, 'users', userId, 'books', bookId), {
+      scroll_offset: offset,
     }, { merge: true });
   } catch {}
 }
@@ -448,8 +459,15 @@ export async function restoreFromSupabase(): Promise<void> {
         if ((b.current_page ?? 0) > existing.current_page) {
           const rawDb = dbMod.getDb();
           await rawDb.runAsync(
-            `UPDATE books SET current_page = ?, total_pages = ?, last_read_at = ? WHERE id = ?`,
-            [b.current_page, b.total_pages, b.last_read_at ?? null, d.id],
+            `UPDATE books SET current_page = ?, total_pages = ?, last_read_at = ?, scroll_offset = ? WHERE id = ?`,
+            [b.current_page, b.total_pages, b.last_read_at ?? null, b.scroll_offset ?? 0, d.id],
+          );
+        } else if ((b.current_page ?? 0) === existing.current_page && (b.scroll_offset ?? 0) !== existing.scroll_offset) {
+          // Same chapter — restore scroll position even if chapter hasn't advanced
+          const rawDb = dbMod.getDb();
+          await rawDb.runAsync(
+            `UPDATE books SET scroll_offset = ? WHERE id = ?`,
+            [b.scroll_offset ?? 0, d.id],
           );
         }
         // Re-download cover if cloud has a URL but local cover is gone
@@ -476,6 +494,7 @@ export async function restoreFromSupabase(): Promise<void> {
           last_read_at: b.last_read_at ?? null,
           current_page: b.current_page ?? 0,
           total_pages: b.total_pages ?? 0,
+          scroll_offset: b.scroll_offset ?? 0,
         });
         // Attempt to re-download cover from stored URL
         if (b.cover_url) {

@@ -108,7 +108,8 @@ export async function initDb(): Promise<void> {
       added_at INTEGER NOT NULL,
       last_read_at INTEGER,
       current_page INTEGER NOT NULL DEFAULT 0,
-      total_pages INTEGER NOT NULL DEFAULT 0
+      total_pages INTEGER NOT NULL DEFAULT 0,
+      scroll_offset REAL NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS book_highlights (
@@ -166,7 +167,12 @@ export async function initDb(): Promise<void> {
     } catch {}
   }
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '12')`);
+  // v13: add scroll_offset to books for per-chapter scroll position restore
+  if (verNum < 13) {
+    try { await db.execAsync(`ALTER TABLE books ADD COLUMN scroll_offset REAL NOT NULL DEFAULT 0`); } catch {}
+  }
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '13')`);
 }
 
 // --- Settings helpers ---
