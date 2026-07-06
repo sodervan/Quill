@@ -60,10 +60,14 @@ export default function HistoryScreen() {
   const [sheetData, setSheetData] = useState<SheetData | null>(null);
 
   useFocusEffect(useCallback(() => {
-    Promise.all([getAllBooks(), getReadHistory(), getAllRemoteSources()]).then(([b, h]) => {
-      setBooks(b.filter((bk) => bk.last_read_at !== null || bk.current_page > 0));
-      setArticleHistory(h);
-    });
+    // Small delay lets any in-flight progress saves from Reader finish before we query
+    const t = setTimeout(() => {
+      Promise.all([getAllBooks(), getReadHistory(), getAllRemoteSources()]).then(([b, h]) => {
+        setBooks(b.filter((bk) => bk.last_read_at !== null || bk.current_page > 0));
+        setArticleHistory(h);
+      });
+    }, 250);
+    return () => clearTimeout(t);
   }, []));
 
   // ── Books ──────────────────────────────────────────────────────────────
@@ -327,9 +331,11 @@ export default function HistoryScreen() {
               )}
               ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
               renderItem={({ item: art }) => {
+                // total_pages=1 means scroll-mode (recordScrollProgress inserts total_pages=1, pages_read=0)
+                // total_pages>1 means page-mode — use pages_read ratio
                 const pct = art.completed
                   ? 100
-                  : art.total_pages > 0
+                  : art.total_pages > 1
                     ? Math.round((art.pages_read / art.total_pages) * 100)
                     : Math.round(art.scroll_depth * 100);
                 const { name: pub, color: pubColor } = resolvePub(art.publication_id);

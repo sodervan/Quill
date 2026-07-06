@@ -56,6 +56,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
   const readStartRef = useRef<number>(Date.now());
   const scrollDepthRef = useRef(0);
   const scrollModeDepthRef = useRef(0);
+  const lastSavedScrollRef = useRef(0);
   const restoreDepthRef = useRef(0);
   const webViewRef = useRef<any>(null);
 
@@ -131,6 +132,16 @@ export default function ReaderScreen({ route, navigation }: Props) {
       }
     };
   }, [articleId]);
+
+  // Save scroll progress when leaving the screen so History sees it immediately on return
+  useEffect(() => {
+    return navigation.addListener('blur', () => {
+      if (scrollModeDepthRef.current > lastSavedScrollRef.current) {
+        lastSavedScrollRef.current = scrollModeDepthRef.current;
+        void recordScrollProgress(articleId, scrollModeDepthRef.current);
+      }
+    });
+  }, [navigation, articleId]);
 
   const onPageSelected = useCallback(
     async (e: { nativeEvent: { position: number } }) => {
@@ -208,9 +219,13 @@ export default function ReaderScreen({ route, navigation }: Props) {
     const depth = parseFloat(raw);
     if (!isNaN(depth)) {
       scrollDepthRef.current = depth;
-      // High-water mark: only advance saved position, never regress
       if (depth > scrollModeDepthRef.current) scrollModeDepthRef.current = depth;
       setScrollProgress(depth);
+      // Save to DB every 10% advancement so History reflects progress immediately on back
+      if (depth - lastSavedScrollRef.current >= 0.1) {
+        lastSavedScrollRef.current = depth;
+        void recordScrollProgress(articleId, depth);
+      }
     }
   }
 
