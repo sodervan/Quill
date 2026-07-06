@@ -289,8 +289,13 @@ export async function uploadLocalToSupabase(): Promise<void> {
   } catch {}
 
   try {
-    const goal = await dbMod.getDailyGoal();
-    await setDoc(doc(db, 'users', userId, 'settings', 'daily_goal'), { value: String(goal) });
+    // Only push goal if user explicitly set it — avoids overwriting the cloud value with the
+    // INSERT OR IGNORE default ('1') on a fresh install before restoreFromSupabase runs.
+    const goalExplicit = await dbMod.getSetting('goal_explicitly_set');
+    if (goalExplicit) {
+      const goal = await dbMod.getDailyGoal();
+      await setDoc(doc(db, 'users', userId, 'settings', 'daily_goal'), { value: String(goal) });
+    }
   } catch {}
 
   // Book highlights — individual setDoc calls (IDs are stable strings, not integers)
@@ -411,6 +416,8 @@ export async function restoreFromSupabase(): Promise<void> {
     const goalSnap = await getDoc(doc(db, 'users', userId, 'settings', 'daily_goal'));
     if (goalSnap.exists()) {
       await dbMod.setSetting('daily_goal', goalSnap.data().value as string);
+      // Mark as explicitly set so future uploadLocalToSupabase calls push the restored value
+      await dbMod.setSetting('goal_explicitly_set', '1');
     }
   } catch {}
 

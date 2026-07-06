@@ -154,7 +154,19 @@ export async function initDb(): Promise<void> {
   // v11: books + book_highlights tables (handled by CREATE TABLE IF NOT EXISTS above)
   // Nothing extra needed — tables are created fresh or already exist.
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '11')`);
+  // v12: mark existing users who have an explicit (non-default) daily goal
+  if (verNum < 12) {
+    try {
+      const existingGoal = await db.getFirstAsync<{ value: string }>(
+        `SELECT value FROM settings WHERE key = 'daily_goal'`,
+      );
+      if (existingGoal && existingGoal.value !== '1') {
+        await db.runAsync(`INSERT OR IGNORE INTO settings (key, value) VALUES ('goal_explicitly_set', '1')`);
+      }
+    } catch {}
+  }
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '12')`);
 }
 
 // --- Settings helpers ---
@@ -491,6 +503,8 @@ export async function getDailyGoal(): Promise<number> {
 
 export async function setDailyGoal(n: number): Promise<void> {
   await setSetting('daily_goal', String(n));
+  // Mark as explicitly set so uploadLocalToSupabase knows to push it (not the INSERT OR IGNORE default)
+  await setSetting('goal_explicitly_set', '1');
   import('../lib/sync').then((m) => m.syncGoal(n)).catch(() => {});
 }
 

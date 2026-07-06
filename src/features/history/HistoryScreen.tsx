@@ -486,7 +486,7 @@ function createStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.
     backgroundColor: colors.surface, borderRadius: radius.lg,
     borderWidth: 1, borderColor: colors.border, padding: 12,
   },
-  statChip: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 4, borderRadius: radius.md },
+  statChip: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 4, borderRadius: 4 },
   statChipActive: { backgroundColor: colors.surfaceHigher },
   statDot: { width: 8, height: 8, borderRadius: 4 },
   statLabel: { ...T.label, color: colors.textMuted },
