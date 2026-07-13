@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator, DeviceEventEmitter, FlatList, ScrollView, StyleSheet,
-  Text, TextInput, TouchableOpacity, View, StatusBar,
+  ActivityIndicator, DeviceEventEmitter, FlatList, KeyboardAvoidingView, Platform,
+  ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, StatusBar,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -183,7 +183,7 @@ export default function DiscoverScreen() {
   const hasMore = visibleCount < filtered.length;
 
   return (
-    <View style={s.root}>
+    <KeyboardAvoidingView style={s.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <StatusBar barStyle="light-content" backgroundColor={colors.bgDeep} />
       <LinearGradient colors={[colors.bgDeep, colors.bg]} style={StyleSheet.absoluteFill} />
 
@@ -441,7 +441,7 @@ export default function DiscoverScreen() {
           </View>
         }
       />
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 

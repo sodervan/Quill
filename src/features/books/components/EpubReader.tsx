@@ -10,6 +10,7 @@ import { useColors } from '../../../theme/ThemeContext';
 import { type as T, space } from '../../../theme';
 import type { BookHighlightRow } from '../../../data/books';
 
+
 interface Chapter { id: string; title: string; html: string; }
 
 export type ReadingTheme = 'default' | 'sepia' | 'night';
@@ -140,14 +141,27 @@ const SELECTION_JS = `
     'z-index:9999','pointer-events:none','white-space:nowrap',
     'box-shadow:0 2px 8px rgba(0,0,0,0.35)',
   ].join(';');
-  hint.textContent = '\\u270E  Tap selection to highlight';
+  hint.textContent = '\\u270E  Tap to highlight or look up';
   document.body.appendChild(hint);
 
+  var selActive = false;
   document.addEventListener('selectionchange', function() {
     var sel = window.getSelection();
     var t = sel ? sel.toString().trim() : '';
-    if (t.length > 2) { cachedSel = t; hint.style.display = 'block'; }
-    else { hint.style.display = 'none'; }
+    if (t.length > 2) {
+      cachedSel = t;
+      hint.style.display = 'block';
+      if (!selActive) {
+        selActive = true;
+        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'sel_active', v: true }));
+      }
+    } else {
+      hint.style.display = 'none';
+      if (selActive) {
+        selActive = false;
+        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'sel_active', v: false }));
+      }
+    }
   });
 
   function sendSel() {
@@ -378,12 +392,15 @@ export default function EpubReader({
     };
   });
 
+  // Disabled while the WebView has an active text selection (sel_active message from SELECTION_JS).
+  const isSelectingRef = useRef(false);
+
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => false,
       onStartShouldSetPanResponderCapture: () => false,
       onMoveShouldSetPanResponder: (_, { dx, dy }) =>
-        Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy) * 3,
+        !isSelectingRef.current && Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy) * 3,
       onShouldBlockNativeResponder: () => false,
       onPanResponderRelease: (_, { dx, vx }) => {
         if (dx < -50 || vx < -0.5) goToFn.current(currentRef.current + 1);
@@ -411,6 +428,8 @@ export default function EpubReader({
       const msg = JSON.parse(e.nativeEvent.data);
       if (msg.type === 'selection' && msg.text) {
         onTextSelected(msg.text, currentRef.current);
+      } else if (msg.type === 'sel_active') {
+        isSelectingRef.current = msg.v as boolean;
       } else if (msg.type === 'scroll_depth') {
         onScrollChanged?.(msg.depth as number);
       }

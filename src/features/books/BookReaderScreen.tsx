@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert, Animated, Dimensions, KeyboardAvoidingView, Platform,
+  Alert, Animated, Dimensions, Keyboard,
   ScrollView, StatusBar, StyleSheet, Text, TextInput,
   TouchableOpacity, TouchableWithoutFeedback, View,
 } from 'react-native';
@@ -26,6 +26,7 @@ type Props = NativeStackScreenProps<RootStackParamList, 'BookReader'>;
 const { height: SCREEN_H } = Dimensions.get('window');
 const SHEET_H = Math.min(520, SCREEN_H * 0.68);
 const LIST_SHEET_H = Math.min(560, SCREEN_H * 0.72);
+const LOOKUP_H = Math.min(Math.round(SCREEN_H * 0.85), 700);
 
 const HIGHLIGHT_COLORS = ['#C8AA6E', '#F97316', '#34D399', '#60A5FA', '#F472B6'];
 
@@ -227,6 +228,37 @@ export default function BookReaderScreen({ route, navigation }: Props) {
   const listAnimY = useRef(new Animated.Value(LIST_SHEET_H)).current;
   const listAnimBg = useRef(new Animated.Value(0)).current;
   const [listMounted, setListMounted] = useState(false);
+
+  // ── Keyboard height tracking (lifts the note sheet above the keyboard) ──
+  const [kbHeight, setKbHeight] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', (e) => setKbHeight(e.endCoordinates.height));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKbHeight(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+
+  // ── Lookup sheet ──
+  const [lookupText, setLookupText] = useState('');
+  const lookupAnimY = useRef(new Animated.Value(LOOKUP_H)).current;
+  const lookupAnimBg = useRef(new Animated.Value(0)).current;
+  const [lookupMounted, setLookupMounted] = useState(false);
+
+  function openLookup(text: string) {
+    Keyboard.dismiss();
+    setLookupText(text);
+    setLookupMounted(true);
+    Animated.parallel([
+      Animated.spring(lookupAnimY, { toValue: 0, tension: 80, friction: 13, useNativeDriver: true }),
+      Animated.timing(lookupAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }
+
+  function closeLookup() {
+    Animated.parallel([
+      Animated.timing(lookupAnimY, { toValue: LOOKUP_H, duration: 260, useNativeDriver: true }),
+      Animated.timing(lookupAnimBg, { toValue: 0, duration: 220, useNativeDriver: true }),
+    ]).start(() => setLookupMounted(false));
+  }
 
   const s = useMemo(() => createStyles(colors), [colors]);
 
@@ -475,10 +507,10 @@ export default function BookReaderScreen({ route, navigation }: Props) {
         <Animated.View
           style={[
             s.sheet,
-            { backgroundColor: colors.surface, height: SHEET_H, transform: [{ translateY: sheetAnimY }] },
+            { backgroundColor: colors.surface, height: SHEET_H, transform: [{ translateY: sheetAnimY }], bottom: kbHeight },
           ]}
         >
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
+          <View style={{ flex: 1 }}>
             <View style={s.sheetHandle} />
 
             <View style={s.sheetHeader}>
@@ -510,7 +542,7 @@ export default function BookReaderScreen({ route, navigation }: Props) {
                 </View>
               ) : null}
 
-              {/* Color picker */}
+              {/* Color picker + Look up (same row) */}
               <View style={s.colorRow}>
                 {HIGHLIGHT_COLORS.map((c) => (
                   <TouchableOpacity
@@ -519,6 +551,18 @@ export default function BookReaderScreen({ route, navigation }: Props) {
                     onPress={() => setSelectedColor(c)}
                   />
                 ))}
+                {((sheetState?.mode === 'add' && sheetState.text) || (sheetState?.mode === 'edit' && sheetState.highlight.selected_text)) && (
+                  <TouchableOpacity
+                    style={[s.lookupBtn, { backgroundColor: colors.accentMuted, borderColor: colors.accentBorder, marginLeft: 'auto' }]}
+                    onPress={() => openLookup(
+                      sheetState!.mode === 'add' ? sheetState!.text : sheetState!.highlight.selected_text
+                    )}
+                    activeOpacity={0.75}
+                  >
+                    <Ionicons name="search-outline" size={13} color={colors.accent} />
+                    <Text style={[s.lookupBtnText, { color: colors.accent }]}>Look up</Text>
+                  </TouchableOpacity>
+                )}
               </View>
 
               {/* Note input */}
@@ -553,7 +597,7 @@ export default function BookReaderScreen({ route, navigation }: Props) {
                 </Text>
               </TouchableOpacity>
             </View>
-          </KeyboardAvoidingView>
+          </View>
         </Animated.View>
       )}
 
@@ -563,6 +607,35 @@ export default function BookReaderScreen({ route, navigation }: Props) {
           <Animated.View style={[StyleSheet.absoluteFill, s.backdrop, { opacity: listAnimBg }]} />
         </TouchableWithoutFeedback>
       )}
+      {lookupMounted && (
+        <TouchableWithoutFeedback onPress={closeLookup}>
+          <Animated.View style={[StyleSheet.absoluteFill, s.backdrop, { opacity: lookupAnimBg }]} />
+        </TouchableWithoutFeedback>
+      )}
+      {lookupMounted && (
+        <Animated.View
+          style={[
+            s.lookupSheet,
+            { backgroundColor: colors.surface, transform: [{ translateY: lookupAnimY }] },
+          ]}
+        >
+          <View style={s.sheetHandle} />
+          <View style={[s.sheetHeader, { borderBottomWidth: 1, borderBottomColor: colors.border }]}>
+            <Ionicons name="search-outline" size={16} color={colors.accent} style={{ marginRight: 4 }} />
+            <Text style={[s.lookupTitle, { color: colors.textSecondary }]} numberOfLines={1}>
+              "{lookupText.slice(0, 50)}{lookupText.length > 50 ? '…' : ''}"
+            </Text>
+            <TouchableOpacity onPress={closeLookup} hitSlop={10}>
+              <Ionicons name="close" size={22} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+          <WebView
+            source={{ uri: `https://www.google.com/search?q=${encodeURIComponent(lookupText)}` }}
+            style={{ flex: 1 }}
+          />
+        </Animated.View>
+      )}
+
       {listMounted && (
         <Animated.View
           style={[
@@ -684,6 +757,17 @@ function createStyles(colors: ReturnType<typeof useColors>) {
       padding: 12, fontSize: 15, lineHeight: 22,
       minHeight: 100,
     },
+    lookupBtn: {
+      flexDirection: 'row', alignItems: 'center', gap: 5,
+      paddingHorizontal: 10, paddingVertical: 6,
+      borderRadius: radius.md, borderWidth: 1,
+    },
+    lookupBtnText: { ...T.caption, fontWeight: '600' as const },
+    lookupSheet: {
+      position: 'absolute', bottom: 0, left: 0, right: 0, height: LOOKUP_H,
+      borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, overflow: 'hidden',
+    },
+    lookupTitle: { ...T.body, fontStyle: 'italic', flex: 1 },
     sheetActions: {
       flexDirection: 'row', alignItems: 'center', gap: 10,
       paddingHorizontal: space.lg, paddingVertical: space.md,

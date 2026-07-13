@@ -26,8 +26,10 @@ export async function searchFeedly(query: string, count = 12): Promise<RemoteSou
     const json = await res.json();
     return (json.results ?? [])
       .map((r: any): RemoteSource | null => {
-        const feedUrl = String(r.feedId ?? '').replace(/^feed\//, '');
-        if (!feedUrl.startsWith('http')) return null;
+        const feedUrlRaw = String(r.feedId ?? '').replace(/^feed\//, '');
+        if (!feedUrlRaw.startsWith('http')) return null;
+        // Upgrade http:// → https:// — Feedly stores old feed IDs with http://
+        const feedUrl = feedUrlRaw.startsWith('http://') ? feedUrlRaw.replace('http://', 'https://') : feedUrlRaw;
         const websiteRaw = String(r.website ?? '').trim();
         return {
           feedUrl,

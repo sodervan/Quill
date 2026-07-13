@@ -172,7 +172,18 @@ export async function initDb(): Promise<void> {
     try { await db.execAsync(`ALTER TABLE books ADD COLUMN scroll_offset REAL NOT NULL DEFAULT 0`); } catch {}
   }
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '13')`);
+  // v14: upgrade http:// feed URLs in remote_sources to https:// (fixes Feedly-sourced feeds
+  //       like the Guardian that use the old guardian.co.uk HTTP domain)
+  if (verNum < 14) {
+    try {
+      await db.execAsync(
+        `UPDATE remote_sources SET feed_url = 'https://' || SUBSTR(feed_url, 8)
+         WHERE feed_url LIKE 'http://%'`,
+      );
+    } catch {}
+  }
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '14')`);
 }
 
 // --- Settings helpers ---
@@ -591,14 +602,20 @@ export function getRemoteMetaSync(id: string): { name: string; color: string; fe
 
 export async function upsertRemoteSource(src: RemoteSourceRow): Promise<void> {
   const db = getDb();
+  // Normalize http:// feed URLs to https:// — Feedly returns old http:// feed IDs
+  // (e.g. feed/http://www.guardian.co.uk/...) which fail on Android release builds
+  const normalizedSrc: RemoteSourceRow = {
+    ...src,
+    feed_url: src.feed_url.startsWith('http://') ? src.feed_url.replace('http://', 'https://') : src.feed_url,
+  };
   await db.runAsync(
     `INSERT OR REPLACE INTO remote_sources (id, name, feed_url, description, color, added_at, website_url)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [src.id, src.name, src.feed_url, src.description, src.color, src.added_at, src.website_url ?? null],
+    [normalizedSrc.id, normalizedSrc.name, normalizedSrc.feed_url, normalizedSrc.description, normalizedSrc.color, normalizedSrc.added_at, normalizedSrc.website_url ?? null],
   );
-  cacheRemoteMeta(src.id, src.name, src.color, src.feed_url);
+  cacheRemoteMeta(normalizedSrc.id, normalizedSrc.name, normalizedSrc.color, normalizedSrc.feed_url);
   // Persist metadata to Firestore so remote follows survive reinstall
-  import('../lib/sync').then((m) => m.syncRemoteSource(src)).catch(() => {});
+  import('../lib/sync').then((m) => m.syncRemoteSource(normalizedSrc)).catch(() => {});
 }
 
 export async function getAllRemoteSources(): Promise<RemoteSourceRow[]> {

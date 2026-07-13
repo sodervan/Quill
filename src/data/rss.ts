@@ -19,8 +19,10 @@ export async function fetchFeed(url: string): Promise<FeedItem[]> {
 }
 
 const FEED_HEADERS = {
-  'User-Agent': 'Perch/1.0 RSS Reader',
+  'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
   'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Cache-Control': 'no-cache',
 };
 
 async function fetchWithTimeout(url: string, timeoutMs = 15000): Promise<Response> {

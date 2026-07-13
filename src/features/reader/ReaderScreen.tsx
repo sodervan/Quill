@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Dimensions, Linking, ScrollView, StatusBar,
-  StyleSheet, Text, TouchableOpacity, View,
+  ActivityIndicator, Alert, Animated, Dimensions, Linking, ScrollView, StatusBar,
+  StyleSheet, Text, TouchableOpacity, TouchableWithoutFeedback, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import PagerView from 'react-native-pager-view';
@@ -27,6 +27,7 @@ import { resolveArticleContent } from '../../data/extractor';
 type Props = NativeStackScreenProps<RootStackParamList, 'Reader'>;
 
 const { height: SCREEN_H, width: SCREEN_W } = Dimensions.get('window');
+const LOOKUP_H = Math.min(Math.round(SCREEN_H * 0.85), 700);
 const READER_FONT = 18;
 const READER_LINE = 30;
 
@@ -59,6 +60,12 @@ export default function ReaderScreen({ route, navigation }: Props) {
   const lastSavedScrollRef = useRef(0);
   const restoreDepthRef = useRef(0);
   const webViewRef = useRef<any>(null);
+  const skipNextDeselectRef = useRef(false);
+
+  const [lookupText, setLookupText] = useState('');
+  const lookupAnimY = useRef(new Animated.Value(LOOKUP_H)).current;
+  const lookupAnimBg = useRef(new Animated.Value(0)).current;
+  const [lookupMounted, setLookupMounted] = useState(false);
 
   const [initialPage, setInitialPage] = useState(0);
 
@@ -184,6 +191,39 @@ export default function ReaderScreen({ route, navigation }: Props) {
     ]);
   }
 
+  function openLookup(text: string) {
+    // Set both the RN-side skip flag AND the JS-side suppress flag before clearing the
+    // selection. The RN flag stops setSelectedText('') from firing; the JS flag stops
+    // the selectionchange handler from nulling window.__savedRange (which we need for
+    // re-highlighting after the lookup sheet closes).
+    skipNextDeselectRef.current = true;
+    webViewRef.current?.injectJavaScript(
+      `window.__suppressRangeClear=true;var s=window.getSelection();if(s)s.removeAllRanges();true;`
+    );
+    setLookupText(text);
+    setLookupMounted(true);
+    Animated.parallel([
+      Animated.spring(lookupAnimY, { toValue: 0, tension: 80, friction: 13, useNativeDriver: true }),
+      Animated.timing(lookupAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }
+
+  function closeLookup() {
+    Animated.parallel([
+      Animated.timing(lookupAnimY, { toValue: LOOKUP_H, duration: 260, useNativeDriver: true }),
+      Animated.timing(lookupAnimBg, { toValue: 0, duration: 220, useNativeDriver: true }),
+    ]).start(() => {
+      setLookupMounted(false);
+      // Small delay so the article WebView regains focus before we restore the selection.
+      // Without this, addRange() is a no-op because the view isn't yet active.
+      setTimeout(() => {
+        webViewRef.current?.injectJavaScript(
+          `if(window.__savedRange){try{var s=window.getSelection();s.removeAllRanges();s.addRange(window.__savedRange);}catch(e){}}true;`
+        );
+      }, 120);
+    });
+  }
+
   function onWebViewLoadEnd() {
     const depth = restoreDepthRef.current;
     if (depth < 0.02) return;
@@ -210,7 +250,10 @@ export default function ReaderScreen({ route, navigation }: Props) {
       // Only treat as a typed event if it's an object with a string type field
       if (msg && typeof msg === 'object' && typeof msg.type === 'string') {
         if (msg.type === 'text_selected') setSelectedText(msg.text ?? '');
-        else if (msg.type === 'text_deselected') setSelectedText('');
+        else if (msg.type === 'text_deselected') {
+          if (skipNextDeselectRef.current) { skipNextDeselectRef.current = false; }
+          else { setSelectedText(''); }
+        }
         else if (msg.type === 'highlight_tap') handleDeleteHighlight(msg.id as number);
         return;
       }
@@ -407,9 +450,15 @@ export default function ReaderScreen({ route, navigation }: Props) {
         {/* ── Highlight toolbar ── rendered as flex sibling so RN touches aren't swallowed by WebView ── */}
         {scrollMode === 'scroll' && !useWebView && selectedText.length > 0 && (
           <View style={s.highlightBar}>
-            <Text style={s.highlightBarLabel} numberOfLines={1}>
-              "{selectedText.slice(0, 40)}{selectedText.length > 40 ? '…' : ''}"
-            </Text>
+            <View style={s.highlightTop}>
+              <Text style={s.highlightBarLabel} numberOfLines={1}>
+                "{selectedText.slice(0, 40)}{selectedText.length > 40 ? '…' : ''}"
+              </Text>
+              <TouchableOpacity onPress={() => openLookup(selectedText)} style={s.lookupPill} hitSlop={8}>
+                <Ionicons name="search-outline" size={13} color={colors.accent} />
+                <Text style={s.lookupPillText}>Look up</Text>
+              </TouchableOpacity>
+            </View>
             <View style={s.highlightColors}>
               {HIGHLIGHT_COLORS.map((hc) => (
                 <TouchableOpacity
@@ -466,7 +515,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
       </SafeAreaView>
 
       {/* ── Scroll-to-top FAB (scroll mode only, appears after scrolling down) ── */}
-      {scrollMode === 'scroll' && !useWebView && scrollProgress > 0.08 && (
+      {scrollMode === 'scroll' && !useWebView && scrollProgress > 0.08 && !lookupMounted && selectedText.length === 0 && (
         <TouchableOpacity
           style={s.scrollTopBtn}
           onPress={() => {
@@ -476,6 +525,31 @@ export default function ReaderScreen({ route, navigation }: Props) {
         >
           <Ionicons name="arrow-up" size={20} color={colors.bg} />
         </TouchableOpacity>
+      )}
+
+      {/* ── Lookup / search sheet ── */}
+      {lookupMounted && (
+        <TouchableWithoutFeedback onPress={closeLookup}>
+          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.65)', opacity: lookupAnimBg }]} />
+        </TouchableWithoutFeedback>
+      )}
+      {lookupMounted && (
+        <Animated.View style={[s.lookupSheet, { transform: [{ translateY: lookupAnimY }] }]}>
+          <View style={s.lookupHandle} />
+          <View style={s.lookupHeader}>
+            <Ionicons name="search-outline" size={16} color={colors.accent} />
+            <Text style={s.lookupTitle} numberOfLines={1}>
+              "{lookupText.slice(0, 60)}{lookupText.length > 60 ? '…' : ''}"
+            </Text>
+            <TouchableOpacity onPress={closeLookup} hitSlop={10}>
+              <Ionicons name="close" size={22} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+          <WebView
+            source={{ uri: `https://www.google.com/search?q=${encodeURIComponent(lookupText)}` }}
+            style={{ flex: 1 }}
+          />
+        </Animated.View>
       )}
     </View>
   );
@@ -504,9 +578,11 @@ const READER_JS = `
   window.addEventListener('scroll', reportScroll, { passive: true });
 
   // Text selection: save the live range into window.__savedRange so it can be used when the
-  // color button is tapped. We do NOT clear the selection so the native Copy/Select-All menu
-  // stays visible. The cloned Range remains valid even after WebView focus is transferred to RN.
+  // color button is tapped. The cloned Range remains valid even after WebView focus is transferred to RN.
+  // __suppressRangeClear: set from RN before programmatically clearing selection (e.g. for lookup)
+  // so the deselect handler does NOT null out the range we want to preserve.
   window.__savedRange = null;
+  window.__suppressRangeClear = false;
   var selTimeout;
   document.addEventListener('selectionchange', function() {
     clearTimeout(selTimeout);
@@ -517,7 +593,11 @@ const READER_JS = `
         try { window.__savedRange = sel.getRangeAt(0).cloneRange(); } catch(e) { window.__savedRange = null; }
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_selected', text: text }));
       } else {
-        window.__savedRange = null;
+        if (window.__suppressRangeClear) {
+          window.__suppressRangeClear = false;
+        } else {
+          window.__savedRange = null;
+        }
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'text_deselected' }));
       }
     }, 400);
@@ -601,13 +681,29 @@ function applyHighlightsToHtml(html: string, highlights: HighlightRow[]): string
 }
 
 function decodeHtmlEntities(s: string): string {
-  // Some RSS feeds HTML-encode their content:encoded instead of wrapping in CDATA.
-  // Decode common entities so the WebView renders markup rather than showing raw tags.
+  // Decode HTML entities before applying highlight regex so that text selected
+  // in the browser (decoded Unicode) matches the stored HTML source.
+  // &amp; is replaced last to avoid double-decoding sequences like &amp;mdash;
   return s
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&ldquo;/g, '“')
+    .replace(/&rdquo;/g, '”')
+    .replace(/&lsquo;/g, '‘')
+    .replace(/&rsquo;/g, '’')
+    .replace(/&mdash;/g, '—')
+    .replace(/&ndash;/g, '–')
+    .replace(/&hellip;/g, '…')
+    .replace(/&bull;/g, '•')
+    .replace(/&copy;/g, '©')
+    .replace(/&reg;/g, '®')
+    .replace(/&trade;/g, '™')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
     .replace(/&amp;/g, '&');
 }
 
@@ -752,18 +848,40 @@ function createReaderStyles(colors: ReturnType<typeof useColors>) { return Style
   highlightBar: {
     backgroundColor: colors.surface,
     borderTopWidth: 1, borderTopColor: colors.borderStrong,
-    paddingHorizontal: space.md, paddingVertical: 14,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: space.md, paddingTop: 10, paddingBottom: 14, gap: 10,
   },
+  highlightTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   highlightBarLabel: {
-    ...T.caption, color: colors.textSecondary, flex: 1, marginRight: 12, fontStyle: 'italic',
+    ...T.caption, color: colors.textSecondary, flex: 1, fontStyle: 'italic',
   },
+  lookupPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0,
+    backgroundColor: colors.accentMuted, borderWidth: 1, borderColor: colors.accentBorder,
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: radius.full,
+  },
+  lookupPillText: { ...T.caption, color: colors.accent, fontWeight: '600' as const },
   highlightColors: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   highlightDot: { width: 26, height: 26, borderRadius: 13 },
   highlightDismiss: {
     width: 26, height: 26, borderRadius: 13,
     backgroundColor: colors.surfaceHigher, alignItems: 'center', justifyContent: 'center',
   },
+  // Lookup sheet
+  lookupSheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0, height: LOOKUP_H,
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, overflow: 'hidden',
+  },
+  lookupHandle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: colors.border, alignSelf: 'center', marginTop: 12, marginBottom: 4,
+  },
+  lookupHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: space.lg, paddingVertical: space.md,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  lookupTitle: { ...T.body, fontStyle: 'italic', color: colors.textSecondary, flex: 1 },
   scrollTopBtn: {
     position: 'absolute', bottom: 80, right: 20,
     width: 44, height: 44, borderRadius: 22,

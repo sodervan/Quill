@@ -1,7 +1,7 @@
 import { parse } from 'node-html-parser';
 import type { FeedItem } from './rss';
 
-const UA = 'Mozilla/5.0 (compatible; Perch/1.0)';
+const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 const NOISE = 'script, style, nav, header, footer, aside, noscript, iframe, [class*="sidebar"], [class*="menu"], [id*="sidebar"], [id*="menu"]';
 const MIN_TITLE = 8;
 
@@ -18,6 +18,11 @@ export function deriveBlogUrl(feedUrl: string): string | null {
     const u = new URL(feedUrl);
     // Redirect/aggregator services — can't derive the real blog URL
     if (/feedburner\.com|feedblitz\.com|feeds2?\./i.test(u.hostname)) return null;
+    // If the URL points directly to an HTML page that looks like an article listing,
+    // treat it as the blog URL itself (e.g. paulgraham.com/articles.html)
+    if (/\/(articles?|posts?|essays?|archive|blog|writing|index)\.html?$/i.test(u.pathname)) {
+      return feedUrl;
+    }
     // Strip common feed file/path endings, including filename variants like rss.html, feed.php
     const path = u.pathname
       .replace(/\/(feed|rss|atom|index)(\.xml|\.rss|\.json|\.html|\.php|\.asp)?\/?$/i, '')
