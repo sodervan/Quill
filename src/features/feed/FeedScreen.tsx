@@ -903,15 +903,17 @@ export default function FeedScreen() {
   // ── Auto-pagination on scroll end ──────────────────────────────────────────
 
   function handleAutoLoadMore() {
-    // Only trigger for Following tab when filtering by a specific publication
-    if (feedTab === 'explore' || !activeFilter) return;
-    
-    // Check if this publication has pagination available
-    if (nextUrlMap.has(activeFilter) && !loadingMoreIds.has(activeFilter)) {
-      void handleLoadMore(activeFilter);
-    } else if (scrapeUrlMap.has(activeFilter) && !loadingMoreIds.has(activeFilter)) {
-      void handleScrapeLoad(activeFilter);
-    }
+    if (feedTab !== 'following') return;
+    // RSS-paginated pubs
+    const rssIds = [...nextUrlMap.keys()].filter(
+      (pubId) => !activeFilter || activeFilter === pubId,
+    );
+    rssIds.forEach((pubId) => void handleLoadMore(pubId));
+    // Unpaginated pubs — try scraping their blog page once per session
+    const scrapeIds = [...scrapeUrlMap.keys()].filter(
+      (pubId) => !activeFilter || activeFilter === pubId,
+    );
+    scrapeIds.forEach((pubId) => void handleScrapeLoad(pubId));
   }
 
   // ── Swipe actions ──────────────────────────────────────────────────────────

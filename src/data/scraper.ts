@@ -149,9 +149,10 @@ function extractArticles(root: any, baseUrl: string, baseHost: string): FeedItem
  * Scrape a web page for article links and a pagination "next" URL.
  * Returns the same shape as fetchFeedPage so callers are unified.
  *
- * Strategy A: data-page JSON (Ghost/React blogs like YC)
- * Strategy B: WordPress REST API for /page/N paginated URLs
- * Strategy C: HTML scraping (generic fallback)
+ * Strategy A: Substack archive API
+ * Strategy B: data-page JSON (Ghost/React blogs like YC)
+ * Strategy C: WordPress REST API for /page/N paginated URLs
+ * Strategy D: HTML scraping (generic fallback)
  */
 export async function scrapeForArticles(url: string): Promise<{ items: FeedItem[]; nextUrl: string | null }> {
   const res = await fetch(url, { headers: { 'User-Agent': UA } });
@@ -162,7 +163,43 @@ export async function scrapeForArticles(url: string): Promise<{ items: FeedItem[
   const { origin } = parsedUrl;
   const baseHost = parsedUrl.hostname;
 
-  // ── Strategy A: Embedded data-page JSON (e.g. YC Ghost blog) ──────────────
+  // ── Strategy A: Substack archive API ────────────────────────────────────────
+  // Substack uses infinite scroll with a JSON API at /api/v1/archive
+  // Check if this is a substack domain (*.substack.com)
+  if (baseHost.endsWith('.substack.com')) {
+    try {
+      // Extract offset from URL if present (for pagination)
+      const offsetMatch = url.match(/[?&]offset=(\d+)/);
+      const offset = offsetMatch ? parseInt(offsetMatch[1], 10) : 0;
+      const limit = 12; // Substack default page size
+
+      const apiUrl = `${origin}/api/v1/archive?sort=new&search=&offset=${offset}&limit=${limit}`;
+      const apiRes = await fetch(apiUrl, { headers: { 'User-Agent': UA } });
+      if (apiRes.ok) {
+        const posts = (await apiRes.json()) as any[];
+        if (Array.isArray(posts) && posts.length > 0) {
+          const items: FeedItem[] = posts
+            .filter((p: any) => p.canonical_url && p.title)
+            .map((p: any) => ({
+              title: (p.title as string).trim() || '(no title)',
+              link: p.canonical_url as string,
+              pubDate: p.post_date ? new Date(p.post_date as string) : new Date(0),
+              excerpt: ((p.description as string | undefined) ?? (p.truncated_body_text as string | undefined) ?? '').slice(0, 300),
+              contentHtml: undefined,
+              imageUrl: (p.cover_image as string | undefined) ?? undefined,
+            }));
+          // If we got a full page, assume there might be more
+          const nextUrl = items.length >= limit ? `${origin}?offset=${offset + limit}` : null;
+          return { items, nextUrl };
+        }
+      }
+    } catch (e) {
+      console.warn('[scraper] Substack API parse failed for', url, e instanceof Error ? e.message : e);
+      // Fall through to other strategies
+    }
+  }
+
+  // ── Strategy B: Embedded data-page JSON (e.g. YC Ghost blog) ──────────────
   // Ghost/custom React sites embed post data as JSON in a data-page attribute,
   // so normal HTML selectors find nothing. Parse the JSON directly.
   // Use indexOf+substring instead of regex to avoid large-string regex issues in Hermes.
