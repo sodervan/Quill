@@ -41,8 +41,6 @@ function makeRemoteId(feedUrl: string): string {
   return 'remote_' + (h >>> 0).toString(36);
 }
 
-
-function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
 function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
   const link = item.link.startsWith('http://') ? item.link.replace('http://', 'https://') : item.link;
   return {
@@ -58,6 +56,8 @@ function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
     fetched_at: Date.now(),
   };
 }
+
+export default function DiscoverScreen() {
   const colors = useColors();
   const s = useMemo(() => createDiscoverStyles(colors), [colors]);
   const [followedIds, setFollowedIds] = useState<Set<string>>(new Set());
