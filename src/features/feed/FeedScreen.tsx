@@ -611,19 +611,21 @@ export default function FeedScreen() {
           const { items, nextUrl } = await fetchFeedPage(feedUrl);
           await upsertArticles(items.map((item) => feedItemToRow(item, pubId)));
           rssOk = true;
-          let paginationUrl = nextUrl ?? null;
-
-          if (items.length < 25 && !nextUrl && blogUrl) {
+          
+          // If RSS provided pagination, use it
+          if (nextUrl) {
+            nextMap.set(pubId, nextUrl);
+          }
+          // If RSS gave us items but no pagination, and we have a blog URL, try scraping for pagination
+          else if (blogUrl && items.length >= 10) {
             try {
               const { items: scraped, nextUrl: scrapedNext } = await scrapeForArticles(blogUrl);
               if (scraped.length > 0) {
                 await upsertArticles(scraped.map((item) => feedItemToRow(item, pubId)));
               }
-              if (scrapedNext) paginationUrl = scrapedNext;
+              if (scrapedNext) nextMap.set(pubId, scrapedNext);
             } catch {}
           }
-
-          if (paginationUrl) nextMap.set(pubId, paginationUrl);
         } catch (e: any) {
           if (blogUrl) {
             try {
@@ -898,6 +900,31 @@ export default function FeedScreen() {
   function scrollToTop() {
     flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }
+
+  // ── Auto-load more on scroll ───────────────────────────────────────────────
+
+  function handleAutoLoadMore() {
+    if (feedTab === 'explore') return; // Explore doesn't have pagination
+
+    // If filtering by a specific pub, load more for that pub
+    if (activeFilter) {
+      void handleLoadMore(activeFilter);
+      return;
+    }
+
+    // "All" view: find which pubs are visible in the current view and load the first one with pagination
+    const pubsWithNext = followedIds.filter((id) => nextUrlMap.has(id) && !loadingMoreIds.has(id));
+    if (pubsWithNext.length > 0) {
+      void handleLoadMore(pubsWithNext[0]);
+      return;
+    }
+
+    // No RSS pagination — try scraping fallback
+    const pubsWithScrape = followedIds.filter((id) => scrapeUrlMap.has(id) && !loadingMoreIds.has(id));
+    if (pubsWithScrape.length > 0) {
+      void handleScrapeLoad(pubsWithScrape[0]);
+    }
   }
 
   // ── Swipe actions ──────────────────────────────────────────────────────────
