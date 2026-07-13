@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator, DeviceEventEmitter, FlatList, KeyboardAvoidingView, Platform,
+  ActivityIndicator, Alert, DeviceEventEmitter, FlatList, KeyboardAvoidingView, Modal, Platform,
   ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, StatusBar,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 import { type as T, space, radius, shadow } from '../../theme';
 import { useColors } from '../../theme/ThemeContext';
@@ -19,6 +20,7 @@ import { fetchFeed, FeedItem } from '../../data/rss';
 import { scrapeForArticles, deriveBlogUrl } from '../../data/scraper';
 import { ArticleRow, upsertArticles } from '../../data/db';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
+import { db, auth } from '../../lib/firebase';
 
 const PAGE_SIZE = 15;
 
@@ -72,6 +74,12 @@ function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
   const [webResults, setWebResults] = useState<RemoteSource[]>([]);
   const [webLoading, setWebLoading] = useState(false);
   const [followingRemote, setFollowingRemote] = useState<Set<string>>(new Set());
+
+  // Feed suggestion modal
+  const [showSuggestModal, setShowSuggestModal] = useState(false);
+  const [suggestUrl, setSuggestUrl] = useState('');
+  const [suggestDescription, setSuggestDescription] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   const loadFollowed = useCallback(async () => {
     const ids = await getFollowedIds();
@@ -163,6 +171,58 @@ function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
         });
     } finally {
       setFollowingRemote((s) => { const n = new Set(s); n.delete(id); return n; });
+    }
+  }
+
+  async function submitFeedSuggestion() {
+    if (!suggestUrl.trim()) {
+      Alert.alert('Missing URL', 'Please enter a feed URL');
+      return;
+    }
+
+    // Basic URL validation
+    const urlPattern = /^https?:\/\/.+/i;
+    if (!urlPattern.test(suggestUrl.trim())) {
+      Alert.alert('Invalid URL', 'Please enter a valid URL starting with http:// or https://');
+      return;
+    }
+
+    // Check if user is logged in
+    if (!auth.currentUser) {
+      Alert.alert(
+        'Sign In Required',
+        'You need to be signed in to suggest feeds. Please sign in from your profile.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await addDoc(collection(db, 'feed_suggestions'), {
+        userId: auth.currentUser.uid,
+        userEmail: auth.currentUser.email || null,
+        feedUrl: suggestUrl.trim(),
+        description: suggestDescription.trim() || null,
+        status: 'pending',
+        submittedAt: serverTimestamp(),
+      });
+
+      Alert.alert(
+        'Thanks! 🎉',
+        'Your feed suggestion has been submitted. We'll review it and add it if it's a good fit.',
+        [{ text: 'OK' }]
+      );
+
+      // Reset form and close modal
+      setSuggestUrl('');
+      setSuggestDescription('');
+      setShowSuggestModal(false);
+    } catch (error) {
+      console.error('Failed to submit feed suggestion:', error);
+      Alert.alert('Error', 'Failed to submit your suggestion. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -435,12 +495,121 @@ function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
                   })}
                 </View>
               )}
+
+              {/* ── Suggest a feed button ── */}
+              <TouchableOpacity
+                style={s.suggestBtn}
+                onPress={() => setShowSuggestModal(true)}
+                activeOpacity={0.8}
+              >
+                <LinearGradient
+                  colors={[colors.accent + '15', colors.accent + '08']}
+                  style={StyleSheet.absoluteFill}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                />
+                <Ionicons name="bulb-outline" size={18} color={colors.accent} />
+                <Text style={s.suggestBtnText}>Suggest a Feed</Text>
+                <Text style={s.suggestBtnSub}>Help us expand our catalog</Text>
+              </TouchableOpacity>
             </View>
 
             <View style={{ height: 100 }} />
           </View>
         }
       />
+
+      {/* ── Feed Suggestion Modal ── */}
+      <Modal
+        visible={showSuggestModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowSuggestModal(false)}
+      >
+        <KeyboardAvoidingView
+          style={s.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setShowSuggestModal(false)}
+          />
+          <View style={s.modalContent}>
+            <View style={s.modalHeader}>
+              <View style={s.modalTitleRow}>
+                <Ionicons name="bulb-outline" size={22} color={colors.accent} />
+                <Text style={s.modalTitle}>Suggest a Feed</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowSuggestModal(false)} hitSlop={8}>
+                <Ionicons name="close" size={24} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={s.modalDesc}>
+              Know a great blog or publication we should add? Share the feed URL and we'll review it.
+            </Text>
+
+            <View style={s.formGroup}>
+              <Text style={s.formLabel}>Feed URL *</Text>
+              <View style={s.inputWrapper}>
+                <Ionicons name="link-outline" size={16} color={colors.textMuted} style={{ marginRight: 8 }} />
+                <TextInput
+                  style={s.input}
+                  placeholder="https://example.com/feed"
+                  placeholderTextColor={colors.textMuted}
+                  value={suggestUrl}
+                  onChangeText={setSuggestUrl}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                  returnKeyType="next"
+                />
+              </View>
+            </View>
+
+            <View style={s.formGroup}>
+              <Text style={s.formLabel}>Why should we add it? (optional)</Text>
+              <View style={[s.inputWrapper, { alignItems: 'flex-start', paddingVertical: 10 }]}>
+                <TextInput
+                  style={[s.input, { height: 80, textAlignVertical: 'top' }]}
+                  placeholder="Tell us what makes this feed special..."
+                  placeholderTextColor={colors.textMuted}
+                  value={suggestDescription}
+                  onChangeText={setSuggestDescription}
+                  multiline
+                  numberOfLines={4}
+                  maxLength={300}
+                  returnKeyType="done"
+                />
+              </View>
+              <Text style={s.charCount}>{suggestDescription.length}/300</Text>
+            </View>
+
+            <TouchableOpacity
+              style={[s.submitBtn, submitting && { opacity: 0.6 }]}
+              onPress={submitFeedSuggestion}
+              disabled={submitting}
+              activeOpacity={0.8}
+            >
+              <LinearGradient
+                colors={[colors.accent, colors.accent + 'CC']}
+                style={StyleSheet.absoluteFill}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+              />
+              {submitting ? (
+                <ActivityIndicator size={20} color={colors.bgDeep} />
+              ) : (
+                <>
+                  <Ionicons name="paper-plane-outline" size={18} color={colors.bgDeep} />
+                  <Text style={s.submitBtnText}>Submit Suggestion</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -575,4 +744,50 @@ function createDiscoverStyles(colors: ReturnType<typeof useColors>) { return Sty
     backgroundColor: colors.accent, borderColor: colors.accent, flexShrink: 0,
   },
   webFollowBtnActive: { backgroundColor: colors.success + '20', borderColor: colors.success + '60' },
+
+  // Suggest feed button
+  suggestBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    marginTop: space.lg, borderRadius: radius.lg,
+    borderWidth: 1, borderColor: colors.accentBorder,
+    paddingVertical: 16, paddingHorizontal: 20, gap: 10,
+    overflow: 'hidden', ...shadow.card,
+  },
+  suggestBtnText: { ...T.h3, color: colors.accent, marginRight: 'auto' },
+  suggestBtnSub: { ...T.caption, color: colors.textMuted, fontStyle: 'italic' },
+
+  // Modal styles
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center', alignItems: 'center', padding: space.lg,
+  },
+  modalContent: {
+    width: '100%', maxWidth: 500,
+    backgroundColor: colors.surface, borderRadius: radius.xl,
+    padding: space.lg, borderWidth: 1, borderColor: colors.border,
+    ...shadow.card,
+  },
+  modalHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: space.md,
+  },
+  modalTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  modalTitle: { ...T.d3, color: colors.text },
+  modalDesc: { ...T.body, color: colors.textSecondary, marginBottom: space.lg, lineHeight: 22 },
+  formGroup: { marginBottom: space.md },
+  formLabel: { ...T.caption, color: colors.textMuted, marginBottom: 6, fontWeight: '600' },
+  inputWrapper: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.bg, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: space.md, paddingVertical: 12,
+  },
+  input: { flex: 1, ...T.body, color: colors.text },
+  charCount: { ...T.caption, color: colors.textMuted, textAlign: 'right', marginTop: 4 },
+  submitBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 14, borderRadius: radius.lg,
+    overflow: 'hidden', marginTop: space.sm,
+  },
+  submitBtnText: { ...T.h3, color: colors.bgDeep, fontWeight: '700' },
 }); }
