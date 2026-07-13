@@ -38,11 +38,14 @@ function articleId(pubId: string, link: string) { return `${pubId}::${link}`; }
 
 function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
   const rawExcerpt = item.excerpt || null;
+  // Upgrade http:// article links to https:// — tracking/redirect URLs like
+  // rss.desiringgod.org use HTTP and fail on Android release builds
+  const link = item.link.startsWith('http://') ? item.link.replace('http://', 'https://') : item.link;
   return {
-    id: articleId(pubId, item.link),
+    id: articleId(pubId, link),
     publication_id: pubId,
     title: item.title,
-    link: item.link,
+    link,
     pub_date: item.pubDate.getTime(),
     excerpt: rawExcerpt ? stripHtml(rawExcerpt) : null,
     content_html: item.contentHtml ?? null,

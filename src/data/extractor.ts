@@ -13,6 +13,38 @@ export interface ArticleContent {
  * Resolve full article content: use feed-provided HTML if available,
  * otherwise fetch the article URL and extract main content.
  */
+const FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+};
+
+/** Upgrade http:// to https:// and retry on failure, same as rss.ts. */
+async function fetchArticle(url: string): Promise<Response | null> {
+  const httpsUrl = url.startsWith('http://') ? url.replace('http://', 'https://') : url;
+  try {
+    const res = await fetch(httpsUrl, { headers: FETCH_HEADERS });
+    if (res.ok) return res;
+    // HTTPS returned an error — try original HTTP if they differ
+    if (httpsUrl !== url) {
+      const fallback = await fetch(url, { headers: FETCH_HEADERS });
+      return fallback.ok ? fallback : null;
+    }
+    return null;
+  } catch {
+    // HTTPS failed at network level — try original HTTP as fallback
+    if (httpsUrl !== url) {
+      try {
+        const fallback = await fetch(url, { headers: FETCH_HEADERS });
+        return fallback.ok ? fallback : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
 export async function resolveArticleContent(
   articleUrl: string,
   feedContentHtml?: string,
@@ -23,14 +55,8 @@ export async function resolveArticleContent(
     if (feedContentHtml) {
       plainText = htmlToPlainText(feedContentHtml);
     } else {
-      const res = await fetch(articleUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-      });
-      if (!res.ok) return null;
+      const res = await fetchArticle(articleUrl);
+      if (!res) return null;
       const html = await res.text();
       plainText = extractMainText(html);
     }

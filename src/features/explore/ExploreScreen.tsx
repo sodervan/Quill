@@ -44,11 +44,13 @@ function makeRemoteId(feedUrl: string): string {
 function articleId(pubId: string, link: string) { return `${pubId}::${link}`; }
 
 function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
+function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
+  const link = item.link.startsWith('http://') ? item.link.replace('http://', 'https://') : item.link;
   return {
-    id: articleId(pubId, item.link),
+    id: articleId(pubId, link),
     publication_id: pubId,
     title: item.title,
-    link: item.link,
+    link,
     pub_date: item.pubDate.getTime(),
     excerpt: item.excerpt || null,
     content_html: item.contentHtml ?? null,
@@ -57,8 +59,6 @@ function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
     fetched_at: Date.now(),
   };
 }
-
-function smartAge(ts: number): string {
   if (ts === 0) return '';
   const d = Math.floor((Date.now() - ts) / 86400000);
   if (d === 0) return 'Today';

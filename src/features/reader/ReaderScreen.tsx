@@ -109,6 +109,8 @@ export default function ReaderScreen({ route, navigation }: Props) {
       const content = await resolveArticleContent(article.link, article.content_html ?? undefined);
 
       if (!content || content.pages.length === 0) {
+        // Upgrade http:// links for WebView — Android WebView in release builds may block cleartext
+        setArticleUrl(article.link.startsWith('http://') ? article.link.replace('http://', 'https://') : article.link);
         setUseWebView(true);
         setLoading(false);
         return;

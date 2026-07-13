@@ -41,11 +41,13 @@ function makeRemoteId(feedUrl: string): string {
 
 
 function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
+function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
+  const link = item.link.startsWith('http://') ? item.link.replace('http://', 'https://') : item.link;
   return {
-    id: `${pubId}::${item.link}`,
+    id: `${pubId}::${link}`,
     publication_id: pubId,
     title: item.title,
-    link: item.link,
+    link,
     pub_date: item.pubDate.getTime(),
     excerpt: item.excerpt || null,
     content_html: item.contentHtml ?? null,
@@ -54,8 +56,6 @@ function feedItemToRow(item: FeedItem, pubId: string): ArticleRow {
     fetched_at: Date.now(),
   };
 }
-
-export default function DiscoverScreen() {
   const colors = useColors();
   const s = useMemo(() => createDiscoverStyles(colors), [colors]);
   const [followedIds, setFollowedIds] = useState<Set<string>>(new Set());
