@@ -900,6 +900,20 @@ export default function FeedScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   }
 
+  // ── Auto-pagination on scroll end ──────────────────────────────────────────
+
+  function handleAutoLoadMore() {
+    // Only trigger for Following tab when filtering by a specific publication
+    if (feedTab === 'explore' || !activeFilter) return;
+    
+    // Check if this publication has pagination available
+    if (nextUrlMap.has(activeFilter) && !loadingMoreIds.has(activeFilter)) {
+      void handleLoadMore(activeFilter);
+    } else if (scrapeUrlMap.has(activeFilter) && !loadingMoreIds.has(activeFilter)) {
+      void handleScrapeLoad(activeFilter);
+    }
+  }
+
   // ── Swipe actions ──────────────────────────────────────────────────────────
 
   async function handleSave(article: ArticleRow) {
