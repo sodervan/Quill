@@ -671,7 +671,7 @@ function createLibraryStyles(colors: ReturnType<typeof useColors>) { return Styl
     borderRadius: radius.lg,
   },
   swipeRemoveBg: {
-    backgroundColor: colors.flame,
+    backgroundColor: '#475569',
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
