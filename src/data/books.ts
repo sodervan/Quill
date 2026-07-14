@@ -160,8 +160,14 @@ export async function getBookHighlights(bookId: string): Promise<BookHighlightRo
 }
 
 export async function deleteBookHighlight(id: string): Promise<void> {
-  const db = getDb();
-  await db.runAsync(`DELETE FROM book_highlights WHERE id = ?`, [id]);
+  try {
+    const db = getDb();
+    await db.runAsync(`DELETE FROM book_highlights WHERE id = ?`, [id]);
+    import('../lib/sync').then((m) => m.syncDeleteBookHighlight(id)).catch(() => {});
+  } catch (err) {
+    console.error('deleteBookHighlight failed:', err);
+    throw err;
+  }
 }
 
 export async function updateBookHighlightNote(id: string, note: string): Promise<void> {

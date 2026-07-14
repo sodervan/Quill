@@ -126,14 +126,19 @@ export default function HighlightsScreen() {
   async function handleDeleteSelectedHighlight() {
     if (!selectedHighlight) return;
     const { type, id } = selectedHighlight;
-    if (type === 'article') {
-      await deleteHighlight(id as number);
-      setArticleItems((prev) => prev.filter((h) => h.id !== id));
-    } else {
-      await deleteBookHighlight(id as string);
-      setBookItems((prev) => prev.filter((h) => h.id !== id));
+    try {
+      if (type === 'article') {
+        await deleteHighlight(id as number);
+        setArticleItems((prev) => prev.filter((h) => h.id !== id));
+      } else {
+        await deleteBookHighlight(id as string);
+        setBookItems((prev) => prev.filter((h) => h.id !== id));
+      }
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch (err) {
+      console.error('Failed to delete highlight:', err);
+      Alert.alert('Error', 'Failed to delete the highlight. Please try again.');
     }
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     closeHighlightMenu();
   }
 

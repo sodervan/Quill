@@ -357,8 +357,13 @@ export default function BookReaderScreen({ route, navigation }: Props) {
     if (!sheetState || sheetState.mode !== 'edit') return;
     const id = sheetState.highlight.id;
     closeSheet(async () => {
-      await deleteBookHighlight(id);
-      setHighlights((prev) => prev.filter((h) => h.id !== id));
+      try {
+        await deleteBookHighlight(id);
+        setHighlights((prev) => prev.filter((h) => h.id !== id));
+      } catch (err) {
+        console.error('Failed to delete book highlight:', err);
+        Alert.alert('Error', 'Failed to delete the highlight. Please try again.');
+      }
     });
   }
 
