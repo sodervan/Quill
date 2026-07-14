@@ -75,6 +75,12 @@ export default function DiscoverScreen() {
   const [webLoading, setWebLoading] = useState(false);
   const [followingRemote, setFollowingRemote] = useState<Set<string>>(new Set());
 
+  // Add by URL
+  const [addUrl, setAddUrl] = useState('');
+  const [addLoading, setAddLoading] = useState(false);
+  const [addStatus, setAddStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [addStatusMsg, setAddStatusMsg] = useState('');
+
   // Feed suggestion modal
   const [showSuggestModal, setShowSuggestModal] = useState(false);
   const [suggestUrl, setSuggestUrl] = useState('');
@@ -174,6 +180,65 @@ export default function DiscoverScreen() {
     }
   }
 
+  async function addByUrl() {
+    const raw = addUrl.trim();
+    if (!raw) return;
+    const url = raw.startsWith('http') ? raw : `https://${raw}`;
+    setAddLoading(true);
+    setAddStatus('idle');
+    setAddStatusMsg('');
+    try {
+      // 1. Try the URL directly as an RSS feed
+      let items = await fetchFeed(url).catch(() => null);
+      let feedUrl = url;
+      let feedName = '';
+
+      if (!items || items.length === 0) {
+        // 2. Try scraping the page for feed links / articles
+        const blogUrl = deriveBlogUrl(url) ?? url;
+        const { items: scraped } = await scrapeForArticles(blogUrl).catch(() => ({ items: [] as FeedItem[] }));
+        if (scraped.length === 0) {
+          setAddStatus('error');
+          setAddStatusMsg('Could not find a feed at that URL. Try pasting the RSS feed link directly.');
+          return;
+        }
+        items = scraped;
+        feedUrl = blogUrl;
+      }
+
+      // Derive a name from the URL hostname if we don't have one yet
+      try { feedName = new URL(feedUrl).hostname.replace(/^www\./, ''); } catch { feedName = feedUrl; }
+
+      const src: import('../../data/feedSearch').RemoteSource = {
+        name: feedName,
+        feedUrl,
+        description: '',
+        subscribers: 0,
+        websiteUrl: feedUrl,
+      };
+      await followRemote(src);
+
+      // Log to Firebase if signed in
+      if (auth.currentUser) {
+        addDoc(collection(db, 'feed_adds'), {
+          userId: auth.currentUser.uid,
+          feedUrl,
+          addedAt: serverTimestamp(),
+          source: 'add_by_url',
+        }).catch(() => {});
+      }
+
+      setAddStatus('success');
+      setAddStatusMsg(`Now following ${feedName}`);
+      setAddUrl('');
+    } catch {
+      setAddStatus('error');
+      setAddStatusMsg('Something went wrong. Check the URL and try again.');
+    } finally {
+      setAddLoading(false);
+    }
+  }
+
   async function submitFeedSuggestion() {
     if (!suggestUrl.trim()) {
       Alert.alert('Missing URL', 'Please enter a feed URL');
@@ -210,7 +275,7 @@ export default function DiscoverScreen() {
 
       Alert.alert(
         'Thanks! 🎉',
-        'Your feed suggestion has been submitted. We'll review it and add it if it's a good fit.',
+        `Your feed suggestion has been submitted. We'll review it and add it if it's a good fit.`,
         [{ text: 'OK' }]
       );
 
@@ -496,6 +561,57 @@ export default function DiscoverScreen() {
                 </View>
               )}
 
+              {/* ── Add by URL ── */}
+              <View style={s.addUrlCard}>
+                <LinearGradient
+                  colors={[colors.accent + '12', 'transparent']}
+                  style={StyleSheet.absoluteFill}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                />
+                <View style={s.addUrlHeader}>
+                  <Ionicons name="link-outline" size={16} color={colors.accent} />
+                  <Text style={s.addUrlTitle}>Add by URL</Text>
+                  <Text style={s.addUrlSub}>Paste any blog or RSS feed link</Text>
+                </View>
+                <View style={s.addUrlRow}>
+                  <TextInput
+                    style={s.addUrlInput}
+                    placeholder="https://example.com/feed"
+                    placeholderTextColor={colors.textMuted}
+                    value={addUrl}
+                    onChangeText={(t) => { setAddUrl(t); setAddStatus('idle'); }}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="url"
+                    returnKeyType="go"
+                    onSubmitEditing={addByUrl}
+                  />
+                  <TouchableOpacity
+                    style={[s.addUrlBtn, addLoading && { opacity: 0.6 }]}
+                    onPress={addByUrl}
+                    disabled={addLoading}
+                  >
+                    {addLoading
+                      ? <ActivityIndicator size={14} color={colors.bgDeep} />
+                      : <Ionicons name="arrow-forward" size={16} color={colors.bgDeep} />
+                    }
+                  </TouchableOpacity>
+                </View>
+                {addStatus !== 'idle' && (
+                  <View style={[s.addStatusRow, { backgroundColor: addStatus === 'success' ? colors.success + '18' : colors.error + '18' }]}>
+                    <Ionicons
+                      name={addStatus === 'success' ? 'checkmark-circle' : 'alert-circle-outline'}
+                      size={14}
+                      color={addStatus === 'success' ? colors.success : colors.error ?? '#EF4444'}
+                    />
+                    <Text style={[s.addStatusText, { color: addStatus === 'success' ? colors.success : colors.error ?? '#EF4444' }]}>
+                      {addStatusMsg}
+                    </Text>
+                  </View>
+                )}
+              </View>
+
               {/* ── Suggest a feed button ── */}
               <TouchableOpacity
                 style={s.suggestBtn}
@@ -745,10 +861,39 @@ function createDiscoverStyles(colors: ReturnType<typeof useColors>) { return Sty
   },
   webFollowBtnActive: { backgroundColor: colors.success + '20', borderColor: colors.success + '60' },
 
+  // Add by URL card
+  addUrlCard: {
+    marginTop: space.lg, borderRadius: radius.lg, overflow: 'hidden',
+    borderWidth: 1, borderColor: colors.accentBorder,
+    padding: space.md, gap: 10, ...shadow.card,
+    backgroundColor: colors.surface,
+  },
+  addUrlHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  addUrlTitle: { ...T.h3, color: colors.accent },
+  addUrlSub: { ...T.caption, color: colors.textMuted, marginLeft: 'auto' },
+  addUrlRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  addUrlInput: {
+    flex: 1, ...T.body, color: colors.text,
+    backgroundColor: colors.bg, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: 10, paddingVertical: 9,
+    fontSize: 13,
+  },
+  addUrlBtn: {
+    width: 38, height: 38, borderRadius: radius.md,
+    backgroundColor: colors.accent,
+    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  },
+  addStatusRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    borderRadius: radius.md, paddingHorizontal: 10, paddingVertical: 7,
+  },
+  addStatusText: { ...T.caption, flex: 1, fontWeight: '600' },
+
   // Suggest feed button
   suggestBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    marginTop: space.lg, borderRadius: radius.lg,
+    marginTop: space.sm, borderRadius: radius.lg,
     borderWidth: 1, borderColor: colors.accentBorder,
     paddingVertical: 16, paddingHorizontal: 20, gap: 10,
     overflow: 'hidden', ...shadow.card,

@@ -54,6 +54,19 @@ export default function ReaderScreen({ route, navigation }: Props) {
   const [stableHtml, setStableHtml] = useState('');
   const [webViewLoadError, setWebViewLoadError] = useState(false);
 
+  // ── Reading theme (Default / Sepia / Night) ──
+  type ReadingTheme = 'default' | 'sepia' | 'night';
+  const [readingTheme, setReadingTheme] = useState<ReadingTheme>('default');
+  const ARTICLE_THEMES: ReadingTheme[] = ['default', 'sepia', 'night'];
+  const THEME_META: Record<ReadingTheme, { icon: string; color: string; label: string }> = {
+    default: { icon: 'sunny-outline', color: colors.textMuted, label: 'Default' },
+    sepia:   { icon: 'leaf-outline',  color: '#8B6040',        label: 'Sepia'   },
+    night:   { icon: 'moon-outline',  color: '#7B9CC8',        label: 'Night'   },
+  };
+  function cycleTheme() {
+    setReadingTheme((t) => ARTICLE_THEMES[(ARTICLE_THEMES.indexOf(t) + 1) % ARTICLE_THEMES.length]);
+  }
+
   const readStartRef = useRef<number>(Date.now());
   const scrollDepthRef = useRef(0);
   const scrollModeDepthRef = useRef(0);
@@ -106,12 +119,35 @@ export default function ReaderScreen({ route, navigation }: Props) {
       if (article.content_html) setRawHtml(article.content_html);
       readStartRef.current = Date.now();
 
+      // First attempt: use feed-provided HTML or try extracting from the URL
       const content = await resolveArticleContent(article.link, article.content_html ?? undefined);
 
       if (!content || content.pages.length === 0) {
-        // Upgrade http:// links for WebView — Android WebView in release builds may block cleartext
-        setArticleUrl(article.link.startsWith('http://') ? article.link.replace('http://', 'https://') : article.link);
-        setUseWebView(true);
+        // Content extraction failed (e.g. paywalled site). Try once more with a
+        // fresh scrape (no cached HTML) before giving up and using the WebView.
+        let scraped = null;
+        if (article.content_html) {
+          // We had HTML but it produced no readable pages — try the live URL
+          scraped = await resolveArticleContent(article.link).catch(() => null);
+        }
+
+        if (scraped && scraped.pages.length > 0) {
+          // Scrape succeeded — render in styled reader
+          if (!article.word_count) await updateArticleWordCount(article.id, scraped.wordCount);
+          setWordCount(scraped.wordCount);
+          setPages(scraped.pages);
+          setStableHtml(buildStyledHtml(
+            scraped.pages.join('\n\n'),
+            article.title,
+            false,
+            existingHighlights,
+            isDark,
+          ));
+        } else {
+          // Upgrade http:// links for WebView — Android WebView in release builds may block cleartext
+          setArticleUrl(article.link.startsWith('http://') ? article.link.replace('http://', 'https://') : article.link);
+          setUseWebView(true);
+        }
         setLoading(false);
         return;
       }
@@ -121,16 +157,17 @@ export default function ReaderScreen({ route, navigation }: Props) {
       setPages(content.pages);
       // Build HTML once with existing highlights baked in — never rebuilt on highlight changes
       setStableHtml(buildStyledHtml(
-        article.content_html ?? content.pages.join('\n\n'),
-        article.title,
-        !!article.content_html,
-        existingHighlights,
-        isDark,
-      ));
-      setLoading(false);
-    }
-    void load();
-  }, [articleId]);
+            article.content_html ?? content.pages.join('\n\n'),
+            article.title,
+            !!article.content_html,
+            existingHighlights,
+            isDark,
+            readingTheme,
+          ));
+          setLoading(false);
+        }
+        void load();
+      }, [articleId, readingTheme]);
 
   useEffect(() => {
     return () => {
@@ -305,7 +342,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
 
           <View style={[s.pubChip, { backgroundColor: c + '18', borderColor: c + '44' }]}>
             <FaviconAvatar feedUrl={articleLink || pub?.feedUrl || ''} emoji={pubEmoji} size={20} />
-            <Text style={[s.pubName, { color: c }]}>{pubName}</Text>
+            <Text style={[s.pubName, { color: c }]} numberOfLines={1}>{pubName}</Text>
           </View>
 
           <View style={s.topRight}>
@@ -323,6 +360,14 @@ export default function ReaderScreen({ route, navigation }: Props) {
                 />
               </TouchableOpacity>
             )}
+            {/* Reading theme cycle */}
+            <TouchableOpacity onPress={cycleTheme} hitSlop={12} style={s.iconCircle}>
+              <Ionicons
+                name={THEME_META[readingTheme].icon as any}
+                size={18}
+                color={THEME_META[readingTheme].color}
+              />
+            </TouchableOpacity>
             <TouchableOpacity onPress={toggleSave} hitSlop={12} style={s.iconCircle}>
               <Ionicons
                 name={saved ? 'bookmark' : 'bookmark-outline'}
@@ -393,6 +438,8 @@ export default function ReaderScreen({ route, navigation }: Props) {
               style={{ flex: 1 }}
               onError={() => setWebViewLoadError(true)}
               onHttpError={(e) => { if (e.nativeEvent.statusCode >= 400) setWebViewLoadError(true); }}
+              injectedJavaScript={DARK_MODE_CSS_JS}
+              onMessage={() => {}}
             />
           )
         ) : pages.length === 0 ? (
@@ -411,7 +458,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
           <WebView
             ref={webViewRef}
             source={{ html: stableHtml }}
-            style={{ flex: 1, backgroundColor: colors.bgDeep }}
+            style={{ flex: 1, backgroundColor: THEME_BG[readingTheme] }}
             injectedJavaScript={READER_JS}
             onMessage={onWebMessage}
             onLoadEnd={onWebViewLoadEnd}
@@ -429,12 +476,12 @@ export default function ReaderScreen({ route, navigation }: Props) {
             {pages.map((text, i) => (
               <ScrollView
                 key={i}
-                style={s.page}
+                style={[s.page, { backgroundColor: THEME_BG[readingTheme] }]}
                 contentContainerStyle={s.pageContent}
                 nestedScrollEnabled
                 showsVerticalScrollIndicator={false}
               >
-                <Text style={s.bodyText}>{text}</Text>
+                <Text style={[s.bodyText, { color: THEME_TEXT[readingTheme] }]}>{text}</Text>
                 {i === pages.length - 1 && (
                   <View style={s.finishedBadge}>
                     <LinearGradient colors={[colors.success + '20', 'transparent']} style={s.finishedGrad}>
@@ -564,6 +611,41 @@ const HIGHLIGHT_COLORS = [
   { color: '#F472B6', label: 'Pink' },
 ];
 
+/** Background colours for each reading theme — applied to WebView and page ScrollView */
+const THEME_BG: Record<string, string> = {
+  default: '#090C15',  // resolved at render from app dark/light; default is the dark bg
+  sepia:   '#F5EDDA',
+  night:   '#0D0D0D',
+};
+
+/** Body text colours for each reading theme (page mode only) */
+const THEME_TEXT: Record<string, string> = {
+  default: '#EDE8E0',
+  sepia:   '#3D2B1A',
+  night:   '#B0B8C8',
+};
+
+/**
+ * Injected into every bare-URL WebView fallback.
+ * Forces a dark background + readable text so sites that render white-bg pages
+ * (like Philosophy Now) aren't jarring. The !important ensures it overrides
+ * the site's own inline styles.
+ */
+const DARK_MODE_CSS_JS = `
+(function() {
+  var style = document.createElement('style');
+  style.textContent = [
+    'html, body { background-color: #090C15 !important; color: #EDE8E0 !important; }',
+    'a { color: #C8AA6E !important; }',
+    'img { max-width: 100% !important; height: auto !important; border-radius: 8px; }',
+  ].join(' ');
+  document.head && document.head.appendChild(style);
+  // Re-apply after any deferred CSS loads
+  setTimeout(function() { document.head && document.head.appendChild(style.cloneNode(true)); }, 800);
+})();
+true;
+`;
+
 const READER_JS = `
 (function() {
   // Scroll depth tracking
@@ -692,33 +774,48 @@ function decodeHtmlEntities(s: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&ldquo;/g, '“')
-    .replace(/&rdquo;/g, '”')
-    .replace(/&lsquo;/g, '‘')
-    .replace(/&rsquo;/g, '’')
-    .replace(/&mdash;/g, '—')
-    .replace(/&ndash;/g, '–')
-    .replace(/&hellip;/g, '…')
-    .replace(/&bull;/g, '•')
-    .replace(/&copy;/g, '©')
-    .replace(/&reg;/g, '®')
-    .replace(/&trade;/g, '™')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&ldquo;/g, '\u201C')
+    .replace(/&rdquo;/g, '\u201D')
+    .replace(/&lsquo;/g, '\u2018')
+    .replace(/&rsquo;/g, '\u2019')
+    .replace(/&mdash;/g, '\u2014')
+    .replace(/&ndash;/g, '\u2013')
+    .replace(/&hellip;/g, '\u2026')
+    .replace(/&bull;/g, '\u2022')
+    .replace(/&copy;/g, '\u00A9')
+    .replace(/&reg;/g, '\u00AE')
+    .replace(/&trade;/g, '\u2122')
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
     .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
     .replace(/&amp;/g, '&');
 }
 
-function buildStyledHtml(content: string, title: string, isHtml = false, highlights: HighlightRow[] = [], isDark = true): string {
-  const bg       = isDark ? '#090C15' : '#F5F4F0';
-  const text     = isDark ? '#EDE8E0' : '#1C1A17';
-  const textSec  = isDark ? '#8E96A9' : '#5C5750';
-  const textMut  = isDark ? '#505869' : '#9A9590';
-  const accent   = isDark ? '#C8AA6E' : '#A67C3D';
-  const surface  = isDark ? '#0E1525' : '#FFFFFF';
-  const surfHigh = isDark ? '#131C2E' : '#F0EEE9';
-  const divider  = isDark ? '#1A2540' : 'rgba(0,0,0,0.09)';
-  const success  = isDark ? '#34D399' : '#16A34A';
+function buildStyledHtml(content: string, title: string, isHtml = false, highlights: HighlightRow[] = [], isDark = true, readingTheme = 'default'): string {
+  // Per-theme colour overrides — sepia and night each have their own palette
+  const themeMap: Record<string, { bg: string; text: string; textSec: string; textMut: string; accent: string; surface: string; surfHigh: string; divider: string; success: string }> = {
+    sepia: {
+      bg: '#F5EDDA', text: '#3D2B1A', textSec: '#6B4E2E', textMut: '#9A7B5A',
+      accent: '#8B4513', surface: '#EDE0C4', surfHigh: '#E3D4B0',
+      divider: 'rgba(61,43,26,0.15)', success: '#2E7D32',
+    },
+    night: {
+      bg: '#0D0D0D', text: '#B0B8C8', textSec: '#6A7585', textMut: '#40474F',
+      accent: '#7B9CC8', surface: '#131313', surfHigh: '#1A1A1A',
+      divider: 'rgba(255,255,255,0.06)', success: '#4CAF50',
+    },
+  };
+
+  const th = themeMap[readingTheme];
+  const bg       = th?.bg       ?? (isDark ? '#090C15' : '#F5F4F0');
+  const text     = th?.text     ?? (isDark ? '#EDE8E0' : '#1C1A17');
+  const textSec  = th?.textSec  ?? (isDark ? '#8E96A9' : '#5C5750');
+  const textMut  = th?.textMut  ?? (isDark ? '#505869' : '#9A9590');
+  const accent   = th?.accent   ?? (isDark ? '#C8AA6E' : '#A67C3D');
+  const surface  = th?.surface  ?? (isDark ? '#0E1525' : '#FFFFFF');
+  const surfHigh = th?.surfHigh ?? (isDark ? '#131C2E' : '#F0EEE9');
+  const divider  = th?.divider  ?? (isDark ? '#1A2540' : 'rgba(0,0,0,0.09)');
+  const success  = th?.success  ?? (isDark ? '#34D399' : '#16A34A');
 
   const rawBody = isHtml
     ? decodeHtmlEntities(content)
@@ -800,96 +897,75 @@ function createReaderStyles(colors: ReturnType<typeof useColors>) { return Style
   },
   pubChip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 12, paddingVertical: 6,
-    borderRadius: radius.full, borderWidth: 1,
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: radius.full, borderWidth: 1, maxWidth: 160,
   },
-  pubEmoji: { fontSize: 13 },
-  pubName: { ...T.badge },
-  progressTrack: { height: 2, backgroundColor: colors.surfaceHigher, overflow: 'hidden' },
-  progressFill: { height: 2 },
-  articleHeader: { paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.md },
-  articleDate: { ...T.label, color: colors.textMuted, marginBottom: space.sm },
-  articleTitle: {
-    fontSize: 22, fontWeight: '800', color: colors.text,
-    lineHeight: 30, letterSpacing: -0.3, marginBottom: space.sm,
-  },
-  readMeta: { flexDirection: 'row', alignItems: 'center', gap: space.xs, flexWrap: 'wrap' },
+  pubName: { ...T.badge, fontSize: 13, fontWeight: '600', flexShrink: 1 },
+  progressTrack: { height: 2, backgroundColor: colors.surfaceHigher, marginHorizontal: space.md },
+  progressFill: { height: 2, borderRadius: 1 },
+  articleHeader: { paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.sm, gap: 4 },
+  articleDate: { ...T.label, color: colors.accent, fontSize: 10 },
+  articleTitle: { ...T.d3, color: colors.text, lineHeight: 30 },
+  readMeta: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4 },
   readMetaText: { ...T.caption, color: colors.textMuted },
   readMetaDot: { ...T.caption, color: colors.textMuted },
-  divider: { height: 1, backgroundColor: colors.border },
-  page: { flex: 1 },
-  pageContent: {
-    paddingHorizontal: space.lg, paddingVertical: space.lg,
-    minHeight: SCREEN_H - 300,
-  },
-  bodyText: {
-    fontSize: READER_FONT, lineHeight: READER_LINE,
-    color: colors.text, letterSpacing: 0.15,
-  },
-  finishedBadge: { marginTop: space.xxl, borderRadius: radius.lg, overflow: 'hidden' },
-  finishedGrad: {
-    alignItems: 'center', paddingVertical: space.xl,
-    gap: space.sm, borderRadius: radius.lg,
-  },
-  finishedText: { ...T.h2, color: colors.success },
+  divider: { height: 1, backgroundColor: colors.border, marginHorizontal: space.lg, marginBottom: 0 },
+  page: { flex: 1, backgroundColor: colors.bgDeep },
+  pageContent: { padding: space.lg, paddingBottom: 60 },
+  bodyText: { fontSize: READER_FONT, lineHeight: READER_LINE, color: colors.text, fontFamily: 'System' },
+  finishedBadge: { marginTop: space.xl, borderRadius: radius.lg, overflow: 'hidden' },
+  finishedGrad: { padding: space.lg, alignItems: 'center', gap: space.sm },
+  finishedText: { ...T.h3, color: colors.success },
   finishedSub: { ...T.caption, color: colors.textMuted },
   footer: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: space.md, paddingVertical: 10,
-    borderTopWidth: 1, borderTopColor: colors.border, minHeight: 48,
+    paddingHorizontal: space.lg, paddingVertical: space.sm,
+    borderTopWidth: 1, borderTopColor: colors.border,
   },
-  pageNum: { ...T.h3, color: colors.textMuted, minWidth: 50 },
-  pageTotal: { fontWeight: '400', color: colors.textMuted },
+  pageNum: { ...T.h3, color: colors.text, minWidth: 60 },
+  pageTotal: { ...T.caption, color: colors.textMuted },
   modeBtn: {
-    height: 32, borderRadius: 16, borderWidth: 1, borderColor: colors.border,
-    backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center',
-    paddingHorizontal: 8,
+    padding: 6, borderRadius: radius.md,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
   },
-
-  // Highlight toolbar — flex sibling of WebView (not absolute) to avoid Android SurfaceView touch interception
   highlightBar: {
-    backgroundColor: colors.surface,
-    borderTopWidth: 1, borderTopColor: colors.borderStrong,
-    paddingHorizontal: space.md, paddingTop: 10, paddingBottom: 14, gap: 10,
+    backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border,
+    paddingHorizontal: space.md, paddingTop: space.sm, paddingBottom: space.md, gap: 10,
   },
-  highlightTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  highlightBarLabel: {
-    ...T.caption, color: colors.textSecondary, flex: 1, fontStyle: 'italic',
-  },
+  highlightTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  highlightBarLabel: { ...T.caption, color: colors.textSecondary, fontStyle: 'italic', flex: 1, marginRight: 8 },
   lookupPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0,
-    backgroundColor: colors.accentMuted, borderWidth: 1, borderColor: colors.accentBorder,
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: radius.full,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: colors.accentMuted, borderRadius: radius.full,
+    paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: colors.accentBorder,
   },
-  lookupPillText: { ...T.caption, color: colors.accent, fontWeight: '600' as const },
+  lookupPillText: { ...T.caption, color: colors.accent, fontWeight: '700' },
   highlightColors: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  highlightDot: { width: 26, height: 26, borderRadius: 13 },
-  highlightDismiss: {
-    width: 26, height: 26, borderRadius: 13,
-    backgroundColor: colors.surfaceHigher, alignItems: 'center', justifyContent: 'center',
+  highlightDot: { width: 28, height: 28, borderRadius: 14 },
+  highlightDismiss: { marginLeft: 'auto' },
+  scrollTopBtn: {
+    position: 'absolute', bottom: 80, right: space.lg,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 6,
+    elevation: 8,
   },
-  // Lookup sheet
   lookupSheet: {
-    position: 'absolute', bottom: 0, left: 0, right: 0, height: LOOKUP_H,
-    backgroundColor: colors.surface,
-    borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, overflow: 'hidden',
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    height: LOOKUP_H, backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
+    borderWidth: 1, borderColor: colors.border,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.3, shadowRadius: 12,
+    elevation: 20,
   },
   lookupHandle: {
-    width: 36, height: 4, borderRadius: 2,
-    backgroundColor: colors.border, alignSelf: 'center', marginTop: 12, marginBottom: 4,
+    width: 36, height: 4, borderRadius: 2, backgroundColor: colors.border,
+    alignSelf: 'center', marginTop: 10, marginBottom: 6,
   },
   lookupHeader: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingHorizontal: space.lg, paddingVertical: space.md,
+    paddingHorizontal: space.md, paddingBottom: space.sm,
     borderBottomWidth: 1, borderBottomColor: colors.border,
   },
-  lookupTitle: { ...T.body, fontStyle: 'italic', color: colors.textSecondary, flex: 1 },
-  scrollTopBtn: {
-    position: 'absolute', bottom: 80, right: 20,
-    width: 44, height: 44, borderRadius: 22,
-    backgroundColor: colors.accent,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
-  },
+  lookupTitle: { ...T.caption, color: colors.text, fontStyle: 'italic', flex: 1 },
 }); }

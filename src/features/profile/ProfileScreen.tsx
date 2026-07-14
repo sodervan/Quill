@@ -1,7 +1,8 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  StatusBar, Switch, Alert, DeviceEventEmitter,
+  StatusBar, Alert, DeviceEventEmitter, Modal, Pressable,
+  Animated,
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -15,8 +16,7 @@ import {
 import { getAllBooks } from '../../data/books';
 import { auth } from '../../lib/firebase';
 import { type as T, space, radius, shadow } from '../../theme';
-import { useColors } from '../../theme/ThemeContext';
-import { useTheme } from '../../theme/ThemeContext';
+import { useColors, useTheme, type ThemePreference } from '../../theme/ThemeContext';
 import { RootStackParamList } from '../../navigation';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
@@ -113,8 +113,38 @@ function createCgStyles(colors: ReturnType<typeof useColors>) { return StyleShee
 
 export default function ProfileScreen() {
   const colors = useColors();
-  const { isDark, toggleTheme } = useTheme();
+  const { isDark, preference, setPreference } = useTheme();
   const s = useMemo(() => createProfileStyles(colors), [colors]);
+  const [themeModalMounted, setThemeModalMounted] = useState(false);
+  const themeAnimY = useRef(new Animated.Value(500)).current;
+  const themeAnimBg = useRef(new Animated.Value(0)).current;
+
+  function openThemeModal() {
+    themeAnimY.setValue(500);
+    themeAnimBg.setValue(0);
+    setThemeModalMounted(true);
+    Animated.parallel([
+      Animated.spring(themeAnimY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 13 }),
+      Animated.timing(themeAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }
+
+  function closeThemeModal() {
+    Animated.parallel([
+      Animated.timing(themeAnimY, { toValue: 500, duration: 260, useNativeDriver: true }),
+      Animated.timing(themeAnimBg, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => {
+      setThemeModalMounted(false);
+    });
+  }
+
+  const THEME_OPTIONS: { value: ThemePreference; label: string; icon: string; desc: string }[] = [
+    { value: 'system', label: 'System default', icon: 'phone-portrait-outline', desc: 'Follows your device setting' },
+    { value: 'light',  label: 'Light',          icon: 'sunny-outline',          desc: 'Always use light mode' },
+    { value: 'dark',   label: 'Dark',            icon: 'moon-outline',           desc: 'Always use dark mode' },
+  ];
+
+  const currentThemeLabel = THEME_OPTIONS.find((o) => o.value === preference)?.label ?? 'System default';
   const nav = useNavigation<Nav>();
   const [streak, setStreak] = useState(0);
   const [todayPages, setTodayPages] = useState(0);
@@ -354,18 +384,18 @@ export default function ProfileScreen() {
               <SettingRow icon="time-outline" label="Reading History" right={<Ionicons name="chevron-forward" size={16} color={colors.textMuted} />} />
             </TouchableOpacity>
             <View style={s.divider} />
-            <SettingRow
-              icon="moon-outline"
-              label="Dark mode"
-              right={
-                <Switch
-                  value={isDark}
-                  onValueChange={toggleTheme}
-                  thumbColor={colors.accent}
-                  trackColor={{ true: colors.accentMuted, false: colors.surfaceHigher }}
-                />
-              }
-            />
+            <TouchableOpacity onPress={openThemeModal} activeOpacity={0.7}>
+              <SettingRow
+                icon="contrast-outline"
+                label="Appearance"
+                right={
+                  <View style={s.themeChip}>
+                    <Text style={s.themeChipText}>{currentThemeLabel}</Text>
+                    <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+                  </View>
+                }
+              />
+            </TouchableOpacity>
             <View style={s.divider} />
             <SettingRow icon="notifications-outline" label="Daily reminder" right={<Text style={s.settingVal}>8:00 AM</Text>} />
             <View style={s.divider} />
@@ -385,6 +415,62 @@ export default function ProfileScreen() {
 
         <View style={{ height: 100 }} />
       </ScrollView>
+
+      {/* ── Appearance / theme picker modal ── */}
+      <Modal
+        visible={themeModalMounted}
+        transparent
+        onRequestClose={closeThemeModal}
+        statusBarTranslucent
+        animationType="none"
+      >
+        <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)', opacity: themeAnimBg }]}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} onPress={closeThemeModal} activeOpacity={1} />
+        </Animated.View>
+        <Animated.View style={[s.modalSheet, { transform: [{ translateY: themeAnimY }], position: 'absolute', bottom: 0, left: 0, right: 0 }]}>
+          {/* Handle */}
+          <View style={s.modalHandle} />
+
+          <Text style={s.modalTitle}>Appearance</Text>
+          <Text style={s.modalSub}>Choose how Quill looks on this device</Text>
+
+          {THEME_OPTIONS.map((opt, i) => {
+            const isSelected = preference === opt.value;
+            return (
+              <TouchableOpacity
+                key={opt.value}
+                style={[
+                  s.themeOption,
+                  i < THEME_OPTIONS.length - 1 && s.themeOptionBorder,
+                  isSelected && s.themeOptionActive,
+                ]}
+                onPress={() => {
+                  setPreference(opt.value);
+                  closeThemeModal();
+                }}
+                activeOpacity={0.7}
+              >
+                <View style={[s.themeIconWrap, isSelected && { backgroundColor: colors.accent + '22', borderColor: colors.accentBorder }]}>
+                  <Ionicons
+                    name={opt.icon as any}
+                    size={20}
+                    color={isSelected ? colors.accent : colors.textSecondary}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[s.themeOptionLabel, isSelected && { color: colors.accent }]}>
+                    {opt.label}
+                  </Text>
+                  <Text style={s.themeOptionDesc}>{opt.desc}</Text>
+                </View>
+                {isSelected && (
+                  <Ionicons name="checkmark-circle" size={20} color={colors.accent} />
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </Animated.View>
+      </Modal>
     </View>
   );
 }
@@ -459,4 +545,46 @@ function createProfileStyles(colors: ReturnType<typeof useColors>) { return Styl
   srIconWrap: { width: 32 },
   srLabel: { ...T.body, color: colors.text, flex: 1 },
   srRight: { alignItems: 'flex-end' },
+
+  // Theme chip (shown in the settings row)
+  themeChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: colors.surfaceHigher, borderRadius: radius.full,
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  themeChipText: { ...T.caption, color: colors.textSecondary, fontWeight: '600' },
+
+  // Theme picker modal
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: space.lg, paddingBottom: 40,
+    ...shadow.card,
+  },
+  modalHandle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: colors.border, alignSelf: 'center',
+    marginTop: 12, marginBottom: space.md,
+  },
+  modalTitle: { ...T.h2, color: colors.text, marginBottom: 4 },
+  modalSub: { ...T.caption, color: colors.textMuted, marginBottom: space.md },
+  themeOption: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    paddingVertical: 14,
+  },
+  themeOptionBorder: { borderBottomWidth: 1, borderBottomColor: colors.border },
+  themeOptionActive: {},
+  themeIconWrap: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: colors.surfaceHigher, borderWidth: 1, borderColor: colors.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  themeOptionLabel: { ...T.h3, color: colors.text, marginBottom: 2 },
+  themeOptionDesc: { ...T.caption, color: colors.textMuted },
 }); }

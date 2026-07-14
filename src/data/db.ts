@@ -661,10 +661,10 @@ export async function getHighlightsForArticle(articleId: string): Promise<Highli
   );
 }
 
-export async function getAllHighlights(): Promise<(HighlightRow & { article_title: string | null; article_link: string | null })[]> {
+export async function getAllHighlights(): Promise<(HighlightRow & { article_title: string | null; article_link: string | null; publication_id: string | null })[]> {
   const db = getDb();
   return db.getAllAsync(
-    `SELECT h.*, a.title AS article_title, a.link AS article_link
+    `SELECT h.*, a.title AS article_title, a.link AS article_link, a.publication_id
      FROM highlights h
      LEFT JOIN articles a ON h.article_id = a.id
      ORDER BY h.created_at DESC`,
@@ -704,4 +704,23 @@ export async function deleteHighlight(id: number): Promise<void> {
   if (row) {
     import('../lib/sync').then((m) => m.syncDeleteHighlight(row.article_id, row.created_at)).catch(() => {});
   }
+}
+
+export async function toggleArticleRead(articleId: string, completed: boolean): Promise<void> {
+  const db = getDb();
+  const now = Date.now();
+  const completedVal = completed ? 1 : 0;
+  const depthVal = completed ? 1.0 : 0.0;
+  
+  await db.runAsync(
+    `INSERT INTO reading_progress (article_id, pages_read, total_pages, scroll_depth, completed, last_read_at)
+     VALUES (?, ?, 1, ?, ?, ?)
+     ON CONFLICT(article_id) DO UPDATE SET
+       scroll_depth = excluded.scroll_depth,
+       completed = excluded.completed,
+       last_read_at = excluded.last_read_at`,
+    [articleId, completed ? 1 : 0, depthVal, completedVal, now],
+  );
+  
+  import('../lib/sync').then((m) => m.syncReadingProgress(articleId)).catch(() => {});
 }
