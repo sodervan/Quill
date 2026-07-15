@@ -15,6 +15,7 @@ import * as Haptics from 'expo-haptics';
 import { RootStackParamList } from '../../navigation';
 import { type as T, space, radius, shadow } from '../../theme';
 import { useColors } from '../../theme/ThemeContext';
+import { AppAlert } from '../../components/AppAlert';
 import { PUBLICATIONS } from '../../data/publications';
 import { fetchFeed, fetchFeedPage, FeedItem } from '../../data/rss';
 import { scrapeForArticles, deriveBlogUrl } from '../../data/scraper';
@@ -153,15 +154,29 @@ function SwipeableCard({
   children,
   onSwipeRight,
   onSwipeLeft,
+  isSaved,
 }: {
   children: React.ReactNode;
   onSwipeRight?: () => void;
   onSwipeLeft?: () => void;
+  isSaved?: boolean;
 }) {
   const colors = useColors();
   const s = useMemo(() => createFeedStyles(colors), [colors]);
   const translateX = useRef(new Animated.Value(0)).current;
   const hapticFired = useRef(false);
+
+  // PanResponder.create() below runs inside useRef, so it's only ever built once, on this
+  // card's first render — its callbacks would otherwise permanently close over that first
+  // render's onSwipeRight/onSwipeLeft (and whatever state, like savedIds, those closed over
+  // at the time). Keeping the latest callbacks in refs and calling through them means every
+  // swipe — not just the first — sees current state (e.g. correctly toggling save/unsave).
+  const onSwipeRightRef = useRef(onSwipeRight);
+  const onSwipeLeftRef = useRef(onSwipeLeft);
+  useEffect(() => {
+    onSwipeRightRef.current = onSwipeRight;
+    onSwipeLeftRef.current = onSwipeLeft;
+  });
 
   const pan = useRef(
     PanResponder.create({
@@ -178,8 +193,8 @@ function SwipeableCard({
         }
       },
       onPanResponderRelease: (_, gs) => {
-        if (gs.dx >= SWIPE_THRESHOLD) onSwipeRight?.();
-        else if (gs.dx <= -SWIPE_THRESHOLD) onSwipeLeft?.();
+        if (gs.dx >= SWIPE_THRESHOLD) onSwipeRightRef.current?.();
+        else if (gs.dx <= -SWIPE_THRESHOLD) onSwipeLeftRef.current?.();
         Animated.spring(translateX, { toValue: 0, useNativeDriver: true, tension: 120, friction: 12 }).start();
       },
       onPanResponderTerminate: () => {
@@ -196,10 +211,10 @@ function SwipeableCard({
 
   return (
     <View style={{ overflow: 'hidden', borderRadius: radius.lg }}>
-      <Animated.View style={[s.swipeBg, s.swipeSaveBg, { opacity: saveOpacity }]}>
+      <Animated.View style={[s.swipeBg, isSaved ? s.swipeUnsaveBg : s.swipeSaveBg, { opacity: saveOpacity }]}>
         <Animated.View style={{ transform: [{ scale: saveScale }], alignItems: 'center', gap: 4 }}>
-          <Ionicons name="bookmark" size={26} color="white" />
-          <Text style={s.swipeLabel}>Save</Text>
+          <Ionicons name={isSaved ? 'bookmark-outline' : 'bookmark'} size={26} color="white" />
+          <Text style={s.swipeLabel}>{isSaved ? 'Remove' : 'Save'}</Text>
         </Animated.View>
       </Animated.View>
       <Animated.View style={[s.swipeBg, s.swipeHideBg, { opacity: hideOpacity }]}>
@@ -414,7 +429,7 @@ function ActionSheet({
     {
       icon: sheet.isFollowed ? 'person-remove-outline' : 'person-add-outline' as any,
       label: sheet.isFollowed ? `Unfollow ${sheet.pubName}` : `Follow ${sheet.pubName}`,
-      color: sheet.isFollowed ? colors.flame : colors.success,
+      color: sheet.isFollowed ? colors.danger : colors.success,
       action: 'follow',
     },
   ];
@@ -497,9 +512,6 @@ export default function FeedScreen() {
   const hiddenRef = useRef<Set<string>>(new Set());
   const [hidden, setHiddenRaw] = useState<Set<string>>(new Set());
   function setHidden(s: Set<string>) { hiddenRef.current = s; setHiddenRaw(s); }
-
-  // Article pending hide confirmation
-  const [pendingHide, setPendingHide] = useState<ArticleRow | null>(null);
 
   // Shuffle — ref keeps loadArticles (stable callback) in sync without adding to its deps
   const [shuffled, setShuffled] = useState(false);
@@ -931,13 +943,17 @@ export default function FeedScreen() {
   }
 
   function handleHide(article: ArticleRow) {
-    setPendingHide(article);
+    AppAlert.alert(
+      'Hide article?',
+      `"${article.title}"\n\nIt won't appear in your feed. Pull down to refresh to restore it.`,
+      [
+        { text: 'Keep', style: 'cancel' },
+        { text: 'Hide', onPress: () => confirmHide(article) },
+      ],
+    );
   }
 
-  function confirmHide() {
-    if (!pendingHide) return;
-    const article = pendingHide;
-    setPendingHide(null);
+  function confirmHide(article: ArticleRow) {
     const next = new Set(hiddenRef.current).add(article.id);
     setHidden(next);
     if (feedTab === 'following') {
@@ -1118,6 +1134,7 @@ export default function FeedScreen() {
       <SwipeableCard
         onSwipeRight={() => void handleSave(item)}
         onSwipeLeft={() => handleHide(item)}
+        isSaved={savedIds.has(item.id)}
       >
         {index === 0
           ? <HeroCard {...sharedProps} />
@@ -1238,6 +1255,14 @@ export default function FeedScreen() {
             <Ionicons name="book-outline" size={56} color={colors.textMuted} />
             <Text style={s.emptyTitle}>Nothing here yet</Text>
             <Text style={s.emptySub}>Go to Discover and follow some publications</Text>
+            <TouchableOpacity
+              style={s.emptyCta}
+              onPress={() => nav.navigate('Tabs', { screen: 'Discover' })}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="compass-outline" size={16} color={colors.bgDeep} />
+              <Text style={s.emptyCtaText}>Go to Discover</Text>
+            </TouchableOpacity>
           </View>
         ) : (
           <View style={{ flex: 1 }}>
@@ -1337,36 +1362,6 @@ export default function FeedScreen() {
         onAction={handleSheetAction}
       />
 
-      {/* ── Hide confirmation modal ── */}
-      {pendingHide && (
-        <Modal transparent animationType="fade" visible={!!pendingHide} onRequestClose={() => setPendingHide(null)} statusBarTranslucent>
-          <View style={s.hideModalOverlay}>
-            <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setPendingHide(null)} activeOpacity={1} />
-            <View style={s.hideModal}>
-              <View style={s.hideModalIconRow}>
-                <View style={s.hideModalIconWrap}>
-                  <Ionicons name="eye-off-outline" size={22} color="#94A3B8" />
-                </View>
-                <Text style={s.hideModalHeading}>Hide article?</Text>
-              </View>
-              <Text style={s.hideModalTitle} numberOfLines={3}>{pendingHide.title}</Text>
-              <Text style={s.hideModalSub}>
-                It won't appear in your feed.{'\n'}Pull down to refresh to restore it.
-              </Text>
-              <View style={s.hideModalActions}>
-                <TouchableOpacity style={s.hideModalKeep} onPress={() => setPendingHide(null)} activeOpacity={0.8}>
-                  <Text style={s.hideModalKeepText}>Keep</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={s.hideModalConfirm} onPress={confirmHide} activeOpacity={0.8}>
-                  <Ionicons name="eye-off-outline" size={15} color="white" />
-                  <Text style={s.hideModalConfirmText}>Hide</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </Modal>
-      )}
-
       {/* ── Publication sheet (long-press filter chip) ── */}
       {pubSheetMounted && pubSheetData && (
         <Modal transparent animationType="none" visible={pubSheetMounted} onRequestClose={closePubSheet} statusBarTranslucent>
@@ -1380,10 +1375,10 @@ export default function FeedScreen() {
             </View>
             <View style={s.sheetDivider} />
             <TouchableOpacity style={s.sheetRow} onPress={() => void handleUnfollowPub()} activeOpacity={0.7}>
-              <View style={[s.sheetRowIcon, { backgroundColor: colors.flame + '18' }]}>
-                <Ionicons name="person-remove-outline" size={20} color={colors.flame} />
+              <View style={[s.sheetRowIcon, { backgroundColor: colors.danger + '18' }]}>
+                <Ionicons name="person-remove-outline" size={20} color={colors.danger} />
               </View>
-              <Text style={[s.sheetRowLabel, { color: colors.flame }]}>Unfollow {pubSheetData.name}</Text>
+              <Text style={[s.sheetRowLabel, { color: colors.danger }]}>Unfollow {pubSheetData.name}</Text>
               <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
             </TouchableOpacity>
             <View style={{ height: 24 }} />
@@ -1540,6 +1535,7 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
     borderRadius: radius.lg,
   },
   swipeSaveBg: { backgroundColor: '#16A34A', alignItems: 'flex-start', paddingLeft: 24 },
+  swipeUnsaveBg: { backgroundColor: '#EF4444', alignItems: 'flex-start', paddingLeft: 24 },
   swipeHideBg: { backgroundColor: '#475569', alignItems: 'flex-end', paddingRight: 24 },
   swipeLabel: { color: 'white', fontSize: 11, fontWeight: '700', marginTop: 2 },
 
@@ -1585,6 +1581,12 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
 
   emptyTitle: { ...T.h2, color: colors.text },
   emptySub: { ...T.body, color: colors.textMuted, textAlign: 'center' },
+  emptyCta: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: colors.accent, borderRadius: radius.full,
+    paddingHorizontal: 20, paddingVertical: 12, marginTop: space.sm,
+  },
+  emptyCtaText: { ...T.h3, color: colors.bgDeep },
 
   loadMoreSection: { paddingTop: 20, paddingBottom: 16, gap: 10 },
   loadMoreHeading: { ...T.label, color: colors.textMuted, marginBottom: 4 },
@@ -1594,46 +1596,6 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
     borderRadius: radius.lg, borderWidth: 1,
   },
   loadMoreText: { ...T.body, fontWeight: '600' },
-
-  // Hide confirmation modal
-  hideModalOverlay: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24,
-  },
-  hideModal: {
-    backgroundColor: colors.surface, borderRadius: 20,
-    borderWidth: 1, borderColor: colors.border,
-    paddingHorizontal: 24, paddingTop: 24, paddingBottom: 20,
-    width: '100%', maxWidth: 360,
-    shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 24, shadowOffset: { width: 0, height: 8 },
-    elevation: 16,
-  },
-  hideModalIconRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
-  hideModalIconWrap: {
-    width: 38, height: 38, borderRadius: 19,
-    backgroundColor: '#94A3B8' + '18', borderWidth: 1, borderColor: '#94A3B8' + '30',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  hideModalHeading: { ...T.h2, color: colors.text },
-  hideModalTitle: {
-    ...T.h3, color: colors.textSecondary,
-    lineHeight: 22, marginBottom: 10,
-  },
-  hideModalSub: { ...T.caption, color: colors.textMuted, lineHeight: 18, marginBottom: 24 },
-  hideModalActions: { flexDirection: 'row', gap: 10 },
-  hideModalKeep: {
-    flex: 1, paddingVertical: 13,
-    borderRadius: radius.md, borderWidth: 1, borderColor: colors.border,
-    backgroundColor: colors.surfaceHigher,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  hideModalKeepText: { ...T.body, color: colors.text, fontWeight: '600' },
-  hideModalConfirm: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: 13, borderRadius: radius.md,
-    backgroundColor: '#475569',
-  },
-  hideModalConfirmText: { ...T.body, color: 'white', fontWeight: '700' },
 
   // New posts pill
   newPostsPillRow: {

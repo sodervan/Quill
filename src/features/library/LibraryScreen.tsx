@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   StatusBar, ActivityIndicator, ScrollView, Animated,
@@ -18,20 +18,29 @@ import { PUBLICATIONS } from '../../data/publications';
 import { type as T, space, radius, shadow } from '../../theme';
 import { useColors } from '../../theme/ThemeContext';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
+import { AppAlert } from '../../components/AppAlert';
 
 const SWIPE_THRESHOLD = 88;
 
+// A completed swipe never removes outright: it springs back and asks for confirmation
+// via onRequestRemove, since a swipe is easy to trigger by accident.
 function SwipeableCard({
   children,
-  onRemove,
+  onRequestRemove,
 }: {
   children: React.ReactNode;
-  onRemove: () => void;
+  onRequestRemove: () => void;
 }) {
   const colors = useColors();
   const s = useMemo(() => createLibraryStyles(colors), [colors]);
   const translateX = useRef(new Animated.Value(0)).current;
   const hapticFired = useRef(false);
+
+  // See FeedScreen's SwipeableCard for why this ref-forwarding is needed: the
+  // PanResponder below is built once (useRef), so its callbacks would otherwise
+  // permanently close over this card's first-render onRequestRemove.
+  const onRequestRemoveRef = useRef(onRequestRemove);
+  useEffect(() => { onRequestRemoveRef.current = onRequestRemove; });
 
   const pan = useRef(
     PanResponder.create({
@@ -49,7 +58,7 @@ function SwipeableCard({
       },
       onPanResponderRelease: (_, gs) => {
         if (Math.abs(gs.dx) >= SWIPE_THRESHOLD) {
-          onRemove();
+          onRequestRemoveRef.current();
         }
         Animated.spring(translateX, { toValue: 0, useNativeDriver: true, tension: 120, friction: 12 }).start();
       },
@@ -196,6 +205,20 @@ export default function LibraryScreen({ navigation }: Props) {
     closeArticleMenu();
   }
 
+  // Swiping is easy to trigger by accident, so it always confirms first. The bottom
+  // sheet's "Remove from Library" is already a deliberate multi-step action, so it
+  // stays immediate — see the onPress wired directly to handleRemoveArticle below.
+  function confirmSwipeRemove(article: ArticleRow) {
+    AppAlert.alert(
+      'Remove from Library?',
+      `"${article.title}" will be removed from your saved articles.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: () => handleRemoveArticle(article.id) },
+      ],
+    );
+  }
+
   const pubInfo = (item: ArticleRow) => {
     const p = PUBLICATIONS.find((x) => x.id === item.publication_id);
     if (p) return { name: p.name, color: p.color, emoji: p.emoji, iconUrl: item.link };
@@ -338,7 +361,7 @@ export default function LibraryScreen({ navigation }: Props) {
             const c = pi.color;
             const prog = progressMap.get(item.id) ?? 0;
             return (
-              <SwipeableCard onRemove={() => handleRemoveArticle(item.id)}>
+              <SwipeableCard onRequestRemove={() => confirmSwipeRemove(item)}>
                 <TouchableOpacity
                   style={s.card}
                   onPress={() => openArticle(item)}
@@ -505,10 +528,10 @@ export default function LibraryScreen({ navigation }: Props) {
                     style={[s.menuItem, { paddingVertical: 12 }]}
                     onPress={() => handleRemoveArticle(selectedArticle.id)}
                   >
-                    <View style={[s.menuIconWrap, { backgroundColor: colors.flame + '18' }]}>
-                      <Ionicons name="trash-outline" size={20} color={colors.flame} />
+                    <View style={[s.menuIconWrap, { backgroundColor: colors.danger + '18' }]}>
+                      <Ionicons name="trash-outline" size={20} color={colors.danger} />
                     </View>
-                    <Text style={[s.menuLabel, { color: colors.flame, fontWeight: '600' }]}>
+                    <Text style={[s.menuLabel, { color: colors.danger, fontWeight: '600' }]}>
                       Remove from library
                     </Text>
                   </TouchableOpacity>

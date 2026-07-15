@@ -1,19 +1,20 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  StatusBar, Alert, Animated, TextInput, ScrollView,
-  Modal, Pressable,
+  StatusBar, Animated, TextInput, ScrollView,
+  Modal, Pressable, PanResponder, Share, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { format } from 'date-fns';
 
 import { getAllHighlights, deleteHighlight, getRemoteMetaSync } from '../../data/db';
 import {
-  getAllBookHighlightsWithTitle, deleteBookHighlight,
+  getAllBookHighlightsWithTitle, deleteBookHighlight, updateBookHighlightNote,
   type BookHighlightWithTitle,
 } from '../../data/books';
 import { PUBLICATIONS } from '../../data/publications';
@@ -21,6 +22,7 @@ import { type as T, space, radius, shadow } from '../../theme';
 import { useColors } from '../../theme/ThemeContext';
 import { RootStackParamList } from '../../navigation';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
+import { AppAlert } from '../../components/AppAlert';
 
 type ArticleHL = {
   id: number; article_id: string; selected_text: string; color: string;
@@ -28,6 +30,90 @@ type ArticleHL = {
   publication_id: string | null;
 };
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
+
+const SWIPE_THRESHOLD = 88;
+
+// Swipe left or right to delete — gray reveal bg, matching the Feed screen's swipe pattern.
+// A completed swipe never deletes outright: it springs back and asks for confirmation
+// (via onRequestDelete), since a swipe is easy to trigger by accident.
+function SwipeableHighlightCard({ children, onRequestDelete }: { children: React.ReactNode; onRequestDelete: () => void }) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const hapticFired = useRef(false);
+
+  // See FeedScreen's SwipeableCard for why this ref-forwarding is needed: the
+  // PanResponder below is built once (useRef), so its callbacks would otherwise
+  // permanently close over this card's first-render onRequestDelete.
+  const onRequestDeleteRef = useRef(onRequestDelete);
+  useEffect(() => { onRequestDeleteRef.current = onRequestDelete; });
+
+  const pan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gs) =>
+        Math.abs(gs.dx) > 6 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.8 && Math.abs(gs.dy) < 20,
+      onPanResponderGrant: () => { hapticFired.current = false; },
+      onPanResponderMove: (_, gs) => {
+        translateX.setValue(gs.dx);
+        if (!hapticFired.current && Math.abs(gs.dx) >= SWIPE_THRESHOLD) {
+          hapticFired.current = true;
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        }
+      },
+      onPanResponderRelease: (_, gs) => {
+        const crossed = Math.abs(gs.dx) >= SWIPE_THRESHOLD;
+        Animated.spring(translateX, { toValue: 0, useNativeDriver: true, tension: 120, friction: 12 }).start();
+        if (crossed) onRequestDeleteRef.current();
+      },
+      onPanResponderTerminate: () => {
+        Animated.spring(translateX, { toValue: 0, useNativeDriver: true }).start();
+      },
+      onPanResponderTerminationRequest: () => true,
+    })
+  ).current;
+
+  // Whole background fades in as you swipe either direction...
+  const bgOpacity = translateX.interpolate({
+    inputRange: [-SWIPE_THRESHOLD, 0, SWIPE_THRESHOLD], outputRange: [1, 0, 1], extrapolate: 'clamp',
+  });
+  // ...but each icon lives pinned to the edge it reveals, and fades in from the very first
+  // pixel of movement in that direction — not centered, and not hidden until halfway.
+  const leftOpacity = translateX.interpolate({ inputRange: [0, SWIPE_THRESHOLD], outputRange: [0, 1], extrapolate: 'clamp' });
+  const rightOpacity = translateX.interpolate({ inputRange: [-SWIPE_THRESHOLD, 0], outputRange: [1, 0], extrapolate: 'clamp' });
+  const leftScale = translateX.interpolate({ inputRange: [0, SWIPE_THRESHOLD], outputRange: [0.6, 1], extrapolate: 'clamp' });
+  const rightScale = translateX.interpolate({ inputRange: [-SWIPE_THRESHOLD, 0], outputRange: [1, 0.6], extrapolate: 'clamp' });
+
+  return (
+    <View style={{ overflow: 'hidden', borderRadius: radius.lg }}>
+      <Animated.View style={[StyleSheet.absoluteFill, swipeStyles.bg, { opacity: bgOpacity }]}>
+        {/* Left edge — revealed when swiping right */}
+        <Animated.View style={[swipeStyles.side, { left: 0, opacity: leftOpacity, transform: [{ scale: leftScale }] }]}>
+          <Ionicons name="trash" size={22} color="white" />
+          <Text style={swipeStyles.label}>Delete</Text>
+        </Animated.View>
+        {/* Right edge — revealed when swiping left */}
+        <Animated.View style={[swipeStyles.side, { right: 0, opacity: rightOpacity, transform: [{ scale: rightScale }] }]}>
+          <Ionicons name="trash" size={22} color="white" />
+          <Text style={swipeStyles.label}>Delete</Text>
+        </Animated.View>
+      </Animated.View>
+      <Animated.View style={{ transform: [{ translateX }] }} {...pan.panHandlers}>
+        {children}
+      </Animated.View>
+    </View>
+  );
+}
+
+const swipeStyles = StyleSheet.create({
+  bg: {
+    borderRadius: radius.lg,
+    backgroundColor: '#475569',
+  },
+  side: {
+    position: 'absolute', top: 0, bottom: 0,
+    alignItems: 'center', justifyContent: 'center',
+    gap: 4, paddingHorizontal: 24,
+  },
+  label: { color: 'white', fontSize: 11, fontWeight: '700', marginTop: 2 },
+});
 
 // Renders a text snippet with the matched portion highlighted
 function MatchText({ text, query, baseStyle, matchBg }: {
@@ -59,15 +145,21 @@ export default function HighlightsScreen() {
   const [loading, setLoading] = useState(true);
 
   // Custom highlights menu sheet state
-  const [selectedHighlight, setSelectedHighlight] = useState<{ type: 'article' | 'book'; id: number | string; text: string } | null>(null);
+  type SelectedHL =
+    | { type: 'article'; item: ArticleHL }
+    | { type: 'book'; item: BookHighlightWithTitle };
+  const [selectedHighlight, setSelectedHighlight] = useState<SelectedHL | null>(null);
   const [highlightMenuMounted, setHighlightMenuMounted] = useState(false);
   const highlightAnimY = useRef(new Animated.Value(500)).current;
   const highlightAnimBg = useRef(new Animated.Value(0)).current;
 
+  // Inline note editor within the sheet (book highlights only)
+  const [noteEditMode, setNoteEditMode] = useState(false);
+  const [noteDraft, setNoteDraft] = useState('');
+
   // Search state
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const searchWidth = useRef(new Animated.Value(0)).current;
   const searchOpacity = useRef(new Animated.Value(0)).current;
 
   // Filter state
@@ -85,25 +177,20 @@ export default function HighlightsScreen() {
 
   function openSearch() {
     setSearchOpen(true);
-    Animated.parallel([
-      Animated.spring(searchWidth, { toValue: 1, tension: 70, friction: 12, useNativeDriver: false }),
-      Animated.timing(searchOpacity, { toValue: 1, duration: 180, useNativeDriver: false }),
-    ]).start();
+    Animated.timing(searchOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
   }
 
   function closeSearch() {
-    Animated.parallel([
-      Animated.timing(searchWidth, { toValue: 0, duration: 220, useNativeDriver: false }),
-      Animated.timing(searchOpacity, { toValue: 0, duration: 160, useNativeDriver: false }),
-    ]).start(() => {
+    Animated.timing(searchOpacity, { toValue: 0, duration: 180, useNativeDriver: true }).start(() => {
       setSearchOpen(false);
       setSearchQuery('');
     });
   }
 
-  function openHighlightMenu(type: 'article' | 'book', id: number | string, text: string) {
+  function openHighlightMenu(hl: SelectedHL) {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setSelectedHighlight({ type, id, text });
+    setSelectedHighlight(hl);
+    setNoteEditMode(false);
     highlightAnimY.setValue(500);
     highlightAnimBg.setValue(0);
     setHighlightMenuMounted(true);
@@ -120,31 +207,105 @@ export default function HighlightsScreen() {
     ]).start(() => {
       setHighlightMenuMounted(false);
       setSelectedHighlight(null);
+      setNoteEditMode(false);
     });
+  }
+
+  async function performDelete(type: 'article' | 'book', id: number | string) {
+    if (type === 'article') {
+      await deleteHighlight(id as number);
+      setArticleItems((prev) => prev.filter((h) => h.id !== id));
+    } else {
+      await deleteBookHighlight(id as string);
+      setBookItems((prev) => prev.filter((h) => h.id !== id));
+    }
   }
 
   async function handleDeleteSelectedHighlight() {
     if (!selectedHighlight) return;
-    const { type, id } = selectedHighlight;
     try {
-      if (type === 'article') {
-        await deleteHighlight(id as number);
-        setArticleItems((prev) => prev.filter((h) => h.id !== id));
-      } else {
-        await deleteBookHighlight(id as string);
-        setBookItems((prev) => prev.filter((h) => h.id !== id));
-      }
+      await performDelete(selectedHighlight.type, selectedHighlight.item.id);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } catch (err) {
       console.error('Failed to delete highlight:', err);
-      Alert.alert('Error', 'Failed to delete the highlight. Please try again.');
+      AppAlert.alert('Error', 'Failed to delete the highlight. Please try again.');
+    }
+    closeHighlightMenu();
+  }
+
+  async function handleSwipeDelete(type: 'article' | 'book', id: number | string) {
+    try {
+      await performDelete(type, id);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch (err) {
+      console.error('Failed to delete highlight:', err);
+      AppAlert.alert('Error', 'Failed to delete the highlight. Please try again.');
+    }
+  }
+
+  // Swiping is easy to trigger by accident, so it always confirms first. The bottom
+  // sheet's delete (long-press → Delete Highlight) is already a deliberate multi-step
+  // action, so it stays immediate — see handleDeleteSelectedHighlight.
+  function confirmSwipeDelete(type: 'article' | 'book', id: number | string) {
+    AppAlert.alert(
+      'Delete highlight?',
+      'This will permanently remove the highlight.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => handleSwipeDelete(type, id) },
+      ],
+    );
+  }
+
+  async function handleShareSelectedHighlight() {
+    if (!selectedHighlight) return;
+    const { type, item } = selectedHighlight;
+    const quote = `"${item.selected_text}"`;
+    const message = type === 'article'
+      ? [quote, item.article_title ? `— ${item.article_title}` : null, item.article_link || null].filter(Boolean).join('\n')
+      : [quote, `— ${item.book_title}`].join('\n');
+    try {
+      await Share.share({ message });
+    } catch (err) {
+      console.error('Failed to share highlight:', err);
+    }
+    closeHighlightMenu();
+  }
+
+  function handleOpenSourceSelectedHighlight() {
+    if (!selectedHighlight) return;
+    const { type, item } = selectedHighlight;
+    closeHighlightMenu();
+    if (type === 'article') {
+      nav.navigate('Reader', { articleId: item.article_id, publicationId: item.publication_id ?? '', highlightId: item.id });
+    } else {
+      openBookHighlight(item);
+    }
+  }
+
+  function openNoteEditor() {
+    if (!selectedHighlight || selectedHighlight.type !== 'book') return;
+    setNoteDraft(selectedHighlight.item.note ?? '');
+    setNoteEditMode(true);
+  }
+
+  async function saveNoteEdit() {
+    if (!selectedHighlight || selectedHighlight.type !== 'book') return;
+    const id = selectedHighlight.item.id;
+    const note = noteDraft.trim();
+    try {
+      await updateBookHighlightNote(id, note);
+      setBookItems((prev) => prev.map((h) => (h.id === id ? { ...h, note: note || null } : h)));
+    } catch (err) {
+      console.error('Failed to update note:', err);
+      AppAlert.alert('Error', 'Failed to save the note. Please try again.');
     }
     closeHighlightMenu();
   }
 
   function openBookHighlight(item: BookHighlightWithTitle) {
     if (!item.book_file_uri) {
-      Alert.alert(
+      AppAlert.alert(
         'Book not on device',
         `"${item.book_title}" hasn't been imported on this device yet. Re-import the file to read it.`,
       );
@@ -219,27 +380,33 @@ export default function HighlightsScreen() {
             <Ionicons name="chevron-back" size={24} color={colors.text} />
           </TouchableOpacity>
 
-          {/* Animated search input */}
-          <Animated.View style={[s.searchContainer, {
-            width: searchWidth.interpolate({ inputRange: [0, 1], outputRange: ['0%', '65%'] }),
-            opacity: searchOpacity,
-          }]}>
+          {/* Stable flex:1 region — its bounds never change whether search is open or
+              closed, so the close button never shifts during the animation. The search
+              bar only fades + scales in/out inside it; the title overlays it when closed. */}
+          <View style={{ flex: 1 }}>
             {searchOpen && (
-              <TextInput
-                style={s.searchInput}
-                placeholder="Search highlights…"
-                placeholderTextColor={colors.textMuted}
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-                autoFocus
-                returnKeyType="search"
-              />
+              <Animated.View style={[s.searchContainer, {
+                opacity: searchOpacity,
+                transform: [{ scale: searchOpacity.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }],
+              }]}>
+                <TextInput
+                  style={s.searchInput}
+                  placeholder="Search highlights…"
+                  placeholderTextColor={colors.textMuted}
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  autoFocus
+                  returnKeyType="search"
+                />
+              </Animated.View>
             )}
-          </Animated.View>
+          </View>
 
-          {/* Title — hides when search is open */}
+          {/* Title — absolutely centered over the whole header, independent of side widths */}
           {!searchOpen && (
-            <Text style={s.headerTitle}>Highlights</Text>
+            <View style={s.headerTitleWrap} pointerEvents="none">
+              <Text style={s.headerTitle}>Highlights</Text>
+            </View>
           )}
 
           <View style={s.headerRight}>
@@ -397,31 +564,33 @@ export default function HighlightsScreen() {
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={s.card}
-                  onPress={() => nav.navigate('Reader', { articleId: item.article_id, publicationId: item.publication_id ?? '' })}
-                  onLongPress={() => openHighlightMenu('article', item.id, item.selected_text)}
-                  activeOpacity={0.8}
-                >
-                  <View style={[s.colorBar, { backgroundColor: item.color }]} />
-                  <View style={s.cardBody}>
-                    <MatchText
-                      text={item.selected_text}
-                      query={searchQuery}
-                      baseStyle={[s.highlightText, { borderLeftColor: item.color + '88' }] as object}
-                      matchBg={item.color + '55'}
-                    />
-                    {item.article_title ? (
-                      <Text style={s.sourceTitle} numberOfLines={1}>{item.article_title}</Text>
-                    ) : null}
-                    <View style={s.cardBottom}>
-                      <Text style={s.date}>{format(new Date(item.created_at), 'MMM d, yyyy')}</Text>
-                      <TouchableOpacity onPress={() => openHighlightMenu('article', item.id, item.selected_text)} hitSlop={8}>
-                        <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
-                      </TouchableOpacity>
+                <SwipeableHighlightCard onRequestDelete={() => confirmSwipeDelete('article', item.id)}>
+                  <TouchableOpacity
+                    style={s.card}
+                    onPress={() => nav.navigate('Reader', { articleId: item.article_id, publicationId: item.publication_id ?? '', highlightId: item.id })}
+                    onLongPress={() => openHighlightMenu({ type: 'article', item })}
+                    activeOpacity={0.8}
+                  >
+                    <View style={[s.colorBar, { backgroundColor: item.color }]} />
+                    <View style={s.cardBody}>
+                      <MatchText
+                        text={item.selected_text}
+                        query={searchQuery}
+                        baseStyle={[s.highlightText, { borderLeftColor: item.color + '88' }] as object}
+                        matchBg={item.color + '55'}
+                      />
+                      {item.article_title ? (
+                        <Text style={s.sourceTitle} numberOfLines={1}>{item.article_title}</Text>
+                      ) : null}
+                      <View style={s.cardBottom}>
+                        <Text style={s.date}>{format(new Date(item.created_at), 'MMM d, yyyy')}</Text>
+                        <TouchableOpacity onPress={() => openHighlightMenu({ type: 'article', item })} hitSlop={8}>
+                          <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
+                        </TouchableOpacity>
+                      </View>
                     </View>
-                  </View>
-                </TouchableOpacity>
+                  </TouchableOpacity>
+                </SwipeableHighlightCard>
               )}
             />
           )
@@ -449,46 +618,48 @@ export default function HighlightsScreen() {
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={s.card}
-                  onPress={() => openBookHighlight(item)}
-                  onLongPress={() => openHighlightMenu('book', item.id, item.selected_text)}
-                  activeOpacity={0.8}
-                >
-                  <View style={[s.colorBar, { backgroundColor: item.color }]} />
-                  <View style={s.cardBody}>
-                    <MatchText
-                      text={item.selected_text}
-                      query={searchQuery}
-                      baseStyle={[s.highlightText, { borderLeftColor: item.color + '88' }] as object}
-                      matchBg={item.color + '55'}
-                    />
-                    {item.note ? (
-                      <Text style={[s.noteLine, { color: colors.accent }]} numberOfLines={2}>
-                        {item.note}
-                      </Text>
-                    ) : null}
-                    <View style={s.bookMeta}>
-                      <Ionicons name="library-outline" size={12} color={colors.textMuted} />
-                      <Text style={s.sourceTitle} numberOfLines={1}>{item.book_title}</Text>
-                      <Text style={[s.chapterLabel, { color: colors.textMuted }]}>
-                        · Ch. {item.page + 1}
-                      </Text>
+                <SwipeableHighlightCard onRequestDelete={() => confirmSwipeDelete('book', item.id)}>
+                  <TouchableOpacity
+                    style={s.card}
+                    onPress={() => openBookHighlight(item)}
+                    onLongPress={() => openHighlightMenu({ type: 'book', item })}
+                    activeOpacity={0.8}
+                  >
+                    <View style={[s.colorBar, { backgroundColor: item.color }]} />
+                    <View style={s.cardBody}>
+                      <MatchText
+                        text={item.selected_text}
+                        query={searchQuery}
+                        baseStyle={[s.highlightText, { borderLeftColor: item.color + '88' }] as object}
+                        matchBg={item.color + '55'}
+                      />
+                      {item.note ? (
+                        <Text style={[s.noteLine, { color: colors.accent }]} numberOfLines={2}>
+                          {item.note}
+                        </Text>
+                      ) : null}
+                      <View style={s.bookMeta}>
+                        <Ionicons name="library-outline" size={12} color={colors.textMuted} />
+                        <Text style={s.sourceTitle} numberOfLines={1}>{item.book_title}</Text>
+                        <Text style={[s.chapterLabel, { color: colors.textMuted }]}>
+                          · Ch. {item.page + 1}
+                        </Text>
+                      </View>
+                      <View style={s.cardBottom}>
+                        <Text style={s.date}>{format(new Date(item.created_at), 'MMM d, yyyy')}</Text>
+                        <TouchableOpacity onPress={() => openHighlightMenu({ type: 'book', item })} hitSlop={8}>
+                          <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
+                        </TouchableOpacity>
+                      </View>
                     </View>
-                    <View style={s.cardBottom}>
-                      <Text style={s.date}>{format(new Date(item.created_at), 'MMM d, yyyy')}</Text>
-                      <TouchableOpacity onPress={() => openHighlightMenu('book', item.id, item.selected_text)} hitSlop={8}>
-                        <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                  {/* Tap hint when book file is missing */}
-                  {!item.book_file_uri && (
-                    <View style={[s.missingChip, { backgroundColor: colors.surfaceHigher }]}>
-                      <Ionicons name="cloud-offline-outline" size={11} color={colors.textMuted} />
-                    </View>
-                  )}
-                </TouchableOpacity>
+                    {/* Tap hint when book file is missing */}
+                    {!item.book_file_uri && (
+                      <View style={[s.missingChip, { backgroundColor: colors.surfaceHigher }]}>
+                        <Ionicons name="cloud-offline-outline" size={11} color={colors.textMuted} />
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                </SwipeableHighlightCard>
               )}
             />
           )
@@ -503,29 +674,108 @@ export default function HighlightsScreen() {
         statusBarTranslucent
         animationType="none"
       >
+        {/* Modal opens its own native window on Android, so the screen-level
+            adjustResize behavior doesn't reach it — the note editor's TextInput
+            would otherwise sit right behind the keyboard with nothing pushing it up. */}
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)', opacity: highlightAnimBg }]}>
           <TouchableOpacity style={StyleSheet.absoluteFill} onPress={closeHighlightMenu} activeOpacity={1} />
         </Animated.View>
         {selectedHighlight && (() => {
+          if (noteEditMode) {
+            return (
+              <Animated.View style={[s.modalSheet, { transform: [{ translateY: highlightAnimY }], position: 'absolute', bottom: 0, left: 0, right: 0 }]}>
+                <Pressable style={{ width: '100%' }} onPress={() => {}}>
+                  <View style={s.modalHandle} />
+
+                  <Text style={s.modalTitle}>Edit Note</Text>
+                  <Text style={s.modalSub}>Add a personal note to this highlight.</Text>
+
+                  <TextInput
+                    style={s.noteInput}
+                    value={noteDraft}
+                    onChangeText={setNoteDraft}
+                    placeholder="Write a note…"
+                    placeholderTextColor={colors.textMuted}
+                    multiline
+                    autoFocus
+                  />
+
+                  <View style={s.menuList}>
+                    <TouchableOpacity style={[s.menuItem, { paddingVertical: 12 }]} onPress={saveNoteEdit}>
+                      <View style={[s.menuIconWrap, { backgroundColor: colors.accentMuted, borderColor: colors.accentBorder }]}>
+                        <Ionicons name="checkmark" size={20} color={colors.accent} />
+                      </View>
+                      <Text style={[s.menuLabel, { color: colors.accent, fontWeight: '600' }]}>Save Note</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={s.menuItem} onPress={() => setNoteEditMode(false)}>
+                      <View style={s.menuIconWrap}>
+                        <Ionicons name="close" size={20} color={colors.textSecondary} />
+                      </View>
+                      <Text style={s.menuLabel}>Cancel</Text>
+                    </TouchableOpacity>
+                  </View>
+                </Pressable>
+              </Animated.View>
+            );
+          }
+
           return (
             <Animated.View style={[s.modalSheet, { transform: [{ translateY: highlightAnimY }], position: 'absolute', bottom: 0, left: 0, right: 0 }]}>
               <Pressable style={{ width: '100%' }} onPress={() => {}}>
                 {/* Drag handle */}
                 <View style={s.modalHandle} />
 
-                <Text style={s.modalTitle}>Delete Highlight?</Text>
-                <Text style={s.modalSub}>This will permanently remove the highlight from Quill.</Text>
+                <Text style={s.modalTitle}>Highlight Options</Text>
+                <Text style={s.modalSub} numberOfLines={2}>"{selectedHighlight.item.selected_text}"</Text>
 
                 <View style={s.menuList}>
+                  {/* Share */}
+                  <TouchableOpacity style={s.menuItem} onPress={handleShareSelectedHighlight}>
+                    <View style={s.menuIconWrap}>
+                      <Ionicons name="share-outline" size={20} color={colors.textSecondary} />
+                    </View>
+                    <Text style={s.menuLabel}>Share Highlight</Text>
+                  </TouchableOpacity>
+
+                  {/* Open source */}
+                  <TouchableOpacity style={s.menuItem} onPress={handleOpenSourceSelectedHighlight}>
+                    <View style={s.menuIconWrap}>
+                      <Ionicons
+                        name={selectedHighlight.type === 'article' ? 'newspaper-outline' : 'book-outline'}
+                        size={20}
+                        color={colors.textSecondary}
+                      />
+                    </View>
+                    <Text style={s.menuLabel}>
+                      {selectedHighlight.type === 'article' ? 'Open Article' : 'Open Book'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Edit note — books only */}
+                  {selectedHighlight.type === 'book' && (
+                    <TouchableOpacity style={s.menuItem} onPress={openNoteEditor}>
+                      <View style={s.menuIconWrap}>
+                        <Ionicons name="create-outline" size={20} color={colors.textSecondary} />
+                      </View>
+                      <Text style={s.menuLabel}>
+                        {selectedHighlight.item.note ? 'Edit Note' : 'Add Note'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  <View style={s.menuDivider} />
+
                   {/* Confirm Delete */}
                   <TouchableOpacity
                     style={[s.menuItem, { paddingVertical: 12 }]}
                     onPress={handleDeleteSelectedHighlight}
                   >
-                    <View style={[s.menuIconWrap, { backgroundColor: colors.flame + '18', borderColor: colors.flame + '44' }]}>
-                      <Ionicons name="trash-outline" size={20} color={colors.flame} />
+                    <View style={[s.menuIconWrap, { backgroundColor: colors.danger + '18', borderColor: colors.danger + '44' }]}>
+                      <Ionicons name="trash-outline" size={20} color={colors.danger} />
                     </View>
-                    <Text style={[s.menuLabel, { color: colors.flame, fontWeight: '600' }]}>
+                    <Text style={[s.menuLabel, { color: colors.danger, fontWeight: '600' }]}>
                       Delete Highlight
                     </Text>
                   </TouchableOpacity>
@@ -545,6 +795,7 @@ export default function HighlightsScreen() {
             </Animated.View>
           );
         })()}
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -553,10 +804,14 @@ export default function HighlightsScreen() {
 function createStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
   header: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    paddingHorizontal: space.md, paddingVertical: space.sm,
+    flexDirection: 'row', alignItems: 'center', gap: 10, position: 'relative',
+    paddingHorizontal: space.md, paddingTop: space.sm, paddingBottom: space.md,
   },
-  headerTitle: { ...T.h2, color: colors.text, flex: 1 },
+  headerTitleWrap: {
+    position: 'absolute', left: 0, right: 0, top: 0, bottom: 0,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  headerTitle: { ...T.h2, color: colors.text },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   countBadge: {
     backgroundColor: colors.accentMuted, borderRadius: radius.full,
@@ -571,13 +826,14 @@ function createStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.
 
   // Animated search bar
   searchContainer: {
-    overflow: 'hidden', flex: 1,
+    overflow: 'hidden',
     backgroundColor: colors.surface, borderRadius: radius.lg,
     borderWidth: 1, borderColor: colors.accentBorder,
     paddingHorizontal: 10,
   },
   searchInput: {
-    height: 34, ...T.body, color: colors.text,
+    height: 44, ...T.body, color: colors.text,
+    paddingVertical: 0, textAlignVertical: 'center',
   },
 
   tabRow: {
@@ -673,6 +929,23 @@ function createStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.
   },
   menuList: {
     gap: 2,
+  },
+  menuDivider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: 6,
+  },
+  noteInput: {
+    ...T.body,
+    color: colors.text,
+    backgroundColor: colors.surfaceHigher,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: space.md,
+    minHeight: 90,
+    textAlignVertical: 'top',
+    marginBottom: space.md,
   },
   menuItem: {
     flexDirection: 'row',

@@ -18,6 +18,7 @@ export const TOPICS = [
   { id: 'philosophy', label: 'Philosophy',             emoji: '🧠', color: '#A78BFA' },
   { id: 'ai',         label: 'Artificial Intelligence',emoji: '✨', color: '#818CF8' },
   { id: 'design',     label: 'Design & Creativity',   emoji: '🎨', color: '#F472B6' },
+  { id: 'books',      label: 'Book Summaries',         emoji: '📚', color: '#F59E0B' },
 ];
 
 export const PUBLICATIONS: Publication[] = [
@@ -455,5 +456,57 @@ export const PUBLICATIONS: Publication[] = [
     color: '#C2410C',
     emoji: '🔥',
     topics: ['essays', 'philosophy'],
+  },
+  {
+    id: 'partially-examined-life',
+    name: 'The Partially Examined Life',
+    author: 'PEL',
+    description: 'A philosophy podcast and blog working through the great texts, one argument at a time.',
+    feedUrl: 'https://partiallyexaminedlife.com/feed/',
+    color: '#A21CAF',
+    emoji: '🎙️',
+    topics: ['philosophy', 'essays'],
+  },
+  {
+    id: '3quarksdaily',
+    name: '3 Quarks Daily',
+    author: '3 Quarks Daily',
+    description: 'A daily digest of the best writing in science, arts, philosophy, and literature from around the web.',
+    feedUrl: 'https://3quarksdaily.com/feed',
+    color: '#65A30D',
+    emoji: '🌀',
+    topics: ['philosophy', 'essays', 'science'],
+  },
+
+  // ── Book Summaries ───────────────────────────────────────────────────
+  {
+    id: 'four-minute-books',
+    name: 'Four Minute Books',
+    author: 'Niklas Göke',
+    description: 'Bite-sized summaries of the best nonfiction books, distilled to the essentials.',
+    feedUrl: 'https://fourminutebooks.com/feed/',
+    color: '#D97706',
+    emoji: '⏱️',
+    topics: ['books', 'essays'],
+  },
+  {
+    id: 'next-big-idea-club',
+    name: 'Next Big Idea Club',
+    author: 'Malcolm Gladwell, Adam Grant, Susan Cain & Daniel Pink',
+    description: 'Curated ideas and excerpts from the best new nonfiction, chosen by four bestselling authors.',
+    feedUrl: 'https://nextbigideaclub.com/feed/',
+    color: '#DB2777',
+    emoji: '💡',
+    topics: ['books', 'essays'],
+  },
+  {
+    id: 'shortform',
+    name: 'Shortform Books',
+    author: 'Shortform',
+    description: "The world's best book summaries — deep, thorough guides to nonfiction's biggest ideas.",
+    feedUrl: 'https://www.shortform.com/blog/feed',
+    color: '#0D9488',
+    emoji: '📕',
+    topics: ['books'],
   },
 ];

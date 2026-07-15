@@ -1,7 +1,7 @@
 import React, { useCallback, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  StatusBar, Alert, DeviceEventEmitter, Modal, Pressable,
+  StatusBar, DeviceEventEmitter, Modal, Pressable,
   Animated,
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
@@ -10,18 +10,32 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { signOut } from 'firebase/auth';
 import {
-  computeStreak, getTodayPages, getDailyGoal, setDailyGoal,
-  getFollowedIds, setSetting, getDailyLogHistory,
+  computeStreak, computeBestStreak, getTodayPages, getDailyGoal, setDailyGoal,
+  getFollowedIds, setSetting, getDailyLogHistory, getArticlesReadCount, getTodayReadingSeconds,
 } from '../../data/db';
 import { getAllBooks } from '../../data/books';
 import { auth } from '../../lib/firebase';
 import { type as T, space, radius, shadow } from '../../theme';
 import { useColors, useTheme, type ThemePreference } from '../../theme/ThemeContext';
 import { RootStackParamList } from '../../navigation';
+import { AppAlert } from '../../components/AppAlert';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Kept short no matter how large the total gets, so the stat tile never has to wrap:
+// under an hour → "42m", under a day → "3h 24m", a day or more → "5d 7h".
+function formatDuration(totalSeconds: number): string {
+  const totalMinutes = Math.round(totalSeconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0) return `${minutes}m`;
+  if (hours < 24) return `${hours}h ${minutes}m`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return `${days}d ${remHours}h`;
+}
 const CELL = 12;
 const GAP = 2;
 const STEP = CELL + GAP;
@@ -147,6 +161,7 @@ export default function ProfileScreen() {
   const currentThemeLabel = THEME_OPTIONS.find((o) => o.value === preference)?.label ?? 'System default';
   const nav = useNavigation<Nav>();
   const [streak, setStreak] = useState(0);
+  const [bestStreak, setBestStreak] = useState(0);
   const [todayPages, setTodayPages] = useState(0);
   const [goal, setGoal] = useState(5);
   const [followedCount, setFollowedCount] = useState(0);
@@ -154,6 +169,8 @@ export default function ProfileScreen() {
   const [booksFinished, setBooksFinished] = useState(0);
   const [booksReading, setBooksReading] = useState(0);
   const [totalBookPages, setTotalBookPages] = useState(0);
+  const [articlesRead, setArticlesRead] = useState(0);
+  const [todayReadingSeconds, setTodayReadingSeconds] = useState(0);
 
   const userEmail = auth.currentUser?.email ?? null;
 
@@ -161,16 +178,18 @@ export default function ProfileScreen() {
     useCallback(() => {
       let active = true;
       (async () => {
-        const [str, p, g, f, hist, bookList] = await Promise.all([
-          computeStreak(), getTodayPages(), getDailyGoal(), getFollowedIds(),
-          getDailyLogHistory(WEEKS * 7), getAllBooks(),
+        const [str, best, p, g, f, hist, bookList, artCount, secs] = await Promise.all([
+          computeStreak(), computeBestStreak(), getTodayPages(), getDailyGoal(), getFollowedIds(),
+          getDailyLogHistory(WEEKS * 7), getAllBooks(), getArticlesReadCount(), getTodayReadingSeconds(),
         ]);
         if (active) {
-          setStreak(str); setTodayPages(p); setGoal(g); setFollowedCount(f.length);
+          setStreak(str); setBestStreak(best); setTodayPages(p); setGoal(g); setFollowedCount(f.length);
           setHistory(hist);
           setBooksFinished(bookList.filter((b) => b.total_pages > 0 && b.current_page >= b.total_pages).length);
           setBooksReading(bookList.filter((b) => b.current_page > 0 && !(b.total_pages > 0 && b.current_page >= b.total_pages)).length);
           setTotalBookPages(bookList.reduce((acc, b) => acc + (b.current_page || 0), 0));
+          setArticlesRead(artCount);
+          setTodayReadingSeconds(secs);
         }
       })();
       return () => { active = false; };
@@ -178,7 +197,7 @@ export default function ProfileScreen() {
   );
 
   async function handleSignOut() {
-    Alert.alert('Sign out', 'Your reading data stays on this device.', [
+    AppAlert.alert('Sign out', 'Your reading data stays on this device.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Sign out', style: 'destructive', onPress: async () => {
@@ -327,22 +346,42 @@ export default function ProfileScreen() {
         <View style={s.section}>
           <Text style={s.sectionTitle}>Reading Stats</Text>
 
+          {/* Overview row — streaks & goal progress span both articles and books, so they don't belong under either */}
+          <Text style={s.statsSubLabel}>Overview</Text>
+          <View style={[s.statsRow, { marginBottom: 10 }]}>
+            <View style={[s.card, s.statCard]}>
+              <Ionicons name="flame" size={24} color={colors.flame} />
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{streak}</Text>
+              <Text style={s.statLabel}>Day streak</Text>
+            </View>
+            <View style={[s.card, s.statCard]}>
+              <Ionicons name="trophy-outline" size={24} color={colors.accent} />
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{bestStreak}</Text>
+              <Text style={s.statLabel}>Best streak</Text>
+            </View>
+            <View style={[s.card, s.statCard]}>
+              <Ionicons name="today-outline" size={24} color={colors.success} />
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{todayPages}</Text>
+              <Text style={s.statLabel}>Pages today</Text>
+            </View>
+          </View>
+
           {/* Articles row */}
           <Text style={s.statsSubLabel}>Articles</Text>
           <View style={[s.statsRow, { marginBottom: 10 }]}>
             <View style={[s.card, s.statCard]}>
-              <Ionicons name="flame" size={24} color={colors.flame} />
-              <Text style={s.statNum}>{streak}</Text>
-              <Text style={s.statLabel}>Day streak</Text>
+              <Ionicons name="newspaper-outline" size={24} color={colors.accent} />
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{articlesRead}</Text>
+              <Text style={s.statLabel}>Articles read</Text>
             </View>
             <View style={[s.card, s.statCard]}>
-              <Ionicons name="book-outline" size={24} color={colors.accent} />
-              <Text style={s.statNum}>{todayPages}</Text>
-              <Text style={s.statLabel}>Pages today</Text>
+              <Ionicons name="time-outline" size={24} color={colors.flame} />
+              <Text style={[s.statNum, { fontSize: 22 }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{formatDuration(todayReadingSeconds)}</Text>
+              <Text style={s.statLabel}>Read today</Text>
             </View>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="compass-outline" size={24} color={colors.success} />
-              <Text style={s.statNum}>{followedCount}</Text>
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{followedCount}</Text>
               <Text style={s.statLabel}>Sources</Text>
             </View>
           </View>
@@ -352,17 +391,17 @@ export default function ProfileScreen() {
           <View style={s.statsRow}>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="checkmark-circle-outline" size={24} color={colors.success} />
-              <Text style={s.statNum}>{booksFinished}</Text>
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{booksFinished}</Text>
               <Text style={s.statLabel}>Finished</Text>
             </View>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="library-outline" size={24} color={colors.accent} />
-              <Text style={s.statNum}>{booksReading}</Text>
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{booksReading}</Text>
               <Text style={s.statLabel}>Reading</Text>
             </View>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="reader-outline" size={24} color={colors.flame} />
-              <Text style={s.statNum}>
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
                 {totalBookPages >= 1000
                   ? `${(totalBookPages / 1000).toFixed(1)}k`
                   : totalBookPages}
@@ -409,7 +448,7 @@ export default function ProfileScreen() {
           <View style={s.card}>
             <SettingRow icon="information-circle-outline" label="Version" right={<Text style={s.settingVal}>1.0.0</Text>} />
             <View style={s.divider} />
-            <SettingRow icon="heart-outline" label="Made with love" right={<Text style={s.settingVal}>✦ Quill</Text>} />
+            <SettingRow icon="heart-outline" label="Made with love" right={<Text style={s.settingVal}>✦ _sodervan</Text>} />
           </View>
         </View>
 
@@ -536,8 +575,11 @@ function createProfileStyles(colors: ReturnType<typeof useColors>) { return Styl
   goalHint: { ...T.caption, color: colors.textMuted, lineHeight: 18 },
   statsRow: { flexDirection: 'row', gap: 10 },
   statsSubLabel: { ...T.caption, color: colors.textMuted, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6, marginTop: 4 },
-  statCard: { flex: 1, alignItems: 'center', paddingVertical: space.md },
-  statNum: { fontSize: 28, fontWeight: '800', color: colors.text, marginTop: 6, marginBottom: 2 },
+  statCard: { flex: 1, alignItems: 'center', paddingVertical: space.md, paddingHorizontal: 4 },
+  statNum: {
+    fontSize: 28, fontWeight: '800', color: colors.text, marginTop: 6, marginBottom: 2,
+    alignSelf: 'stretch', textAlign: 'center',
+  },
   statLabel: { ...T.caption, color: colors.textMuted },
   divider: { height: 1, backgroundColor: colors.border },
   settingVal: { ...T.caption, color: colors.textMuted },

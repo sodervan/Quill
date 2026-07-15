@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert, Animated, Dimensions, Keyboard,
+  Animated, Dimensions, Keyboard,
   ScrollView, StatusBar, StyleSheet, Text, TextInput,
   TouchableOpacity, TouchableWithoutFeedback, View,
 } from 'react-native';
@@ -13,6 +13,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { RootStackParamList } from '../../navigation';
 import { type as T, space, radius } from '../../theme';
 import { useColors, useTheme } from '../../theme/ThemeContext';
+import { AppAlert } from '../../components/AppAlert';
 import {
   getBookById, updateBookProgress, updateBookScrollOffset, upsertBookHighlight,
   getBookHighlights, deleteBookHighlight, updateBookHighlightNote,
@@ -362,7 +363,7 @@ export default function BookReaderScreen({ route, navigation }: Props) {
         setHighlights((prev) => prev.filter((h) => h.id !== id));
       } catch (err) {
         console.error('Failed to delete book highlight:', err);
-        Alert.alert('Error', 'Failed to delete the highlight. Please try again.');
+        AppAlert.alert('Error', 'Failed to delete the highlight. Please try again.');
       }
     });
   }
@@ -590,7 +591,7 @@ export default function BookReaderScreen({ route, navigation }: Props) {
                   style={[s.deleteBtn, { borderColor: colors.border }]}
                   onPress={deleteCurrentHighlight}
                 >
-                  <Ionicons name="trash-outline" size={18} color={colors.flame} />
+                  <Ionicons name="trash-outline" size={18} color={colors.danger} />
                 </TouchableOpacity>
               )}
               <TouchableOpacity

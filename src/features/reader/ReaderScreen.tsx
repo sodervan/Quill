@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Animated, Dimensions, Linking, ScrollView, StatusBar,
+  ActivityIndicator, Animated, Dimensions, Linking, ScrollView, StatusBar,
   StyleSheet, Text, TouchableOpacity, TouchableWithoutFeedback, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -15,6 +15,7 @@ import { RootStackParamList } from '../../navigation';
 import { type as T, space, radius } from '../../theme';
 import { useColors, useTheme } from '../../theme/ThemeContext';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
+import { AppAlert } from '../../components/AppAlert';
 import { PUBLICATIONS } from '../../data/publications';
 import {
   getArticleById, recordPageRead, recordScrollProgress, updateArticleWordCount,
@@ -35,7 +36,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
   const colors = useColors();
   const { isDark } = useTheme();
   const s = useMemo(() => createReaderStyles(colors), [colors]);
-  const { articleId, publicationId } = route.params;
+  const { articleId, publicationId, highlightId } = route.params;
 
   const [title, setTitle] = useState('');
   const [pages, setPages] = useState<string[]>([]);
@@ -215,7 +216,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
   }
 
   function handleDeleteHighlight(id: number) {
-    Alert.alert('Remove highlight?', undefined, [
+    AppAlert.alert('Remove highlight?', undefined, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Remove', style: 'destructive',
@@ -223,7 +224,7 @@ export default function ReaderScreen({ route, navigation }: Props) {
           await deleteHighlight(id);
           setHighlights((prev) => prev.filter((h) => h.id !== id));
           webViewRef.current?.injectJavaScript(
-            `(function(){var m=document.querySelector('mark[data-highlight-id="${id}"]');if(m){var f=document.createDocumentFragment();while(m.firstChild)f.appendChild(m.firstChild);m.parentNode.replaceChild(f,m);}})();true;`
+            `(function(){var ms=document.querySelectorAll('mark[data-highlight-id="${id}"]');for(var i=0;i<ms.length;i++){var m=ms[i];var f=document.createDocumentFragment();while(m.firstChild)f.appendChild(m.firstChild);m.parentNode.replaceChild(f,m);}})();true;`
           );
         },
       },
@@ -265,6 +266,30 @@ export default function ReaderScreen({ route, navigation }: Props) {
 
   function onWebViewLoadEnd() {
     const depth = restoreDepthRef.current;
+
+    // Arriving from a highlight tap — scroll to the highlighted text instead of the
+    // last-read position. Falls back to the normal depth-based restore if the mark
+    // can't be found (e.g. it spanned a paragraph break and didn't re-apply on load).
+    if (highlightId != null) {
+      webViewRef.current?.injectJavaScript(`
+        (function(){
+          var id=${highlightId}, d=${depth.toFixed(4)}, tries=0;
+          function go(){
+            var el=document.querySelector('mark[data-highlight-id="'+id+'"]');
+            if(el){ el.scrollIntoView({block:'center',behavior:'smooth'}); return; }
+            if(tries<20){ tries++; setTimeout(go,120); return; }
+            if(d>=0.02){
+              var h=document.documentElement.scrollHeight;
+              window.scrollTo({top:Math.round(d*h),behavior:'smooth'});
+            }
+          }
+          setTimeout(go,250);
+        })();
+        true;
+      `);
+      return;
+    }
+
     if (depth < 0.02) return;
     // Retry until scrollHeight is ready (images / fonts may still be loading)
     webViewRef.current?.injectJavaScript(`
@@ -713,15 +738,40 @@ function buildInjectMarkJS(text: string, id: number, color: string): string {
     m.style.cssText=css;
     return m;
   }
-  // Primary: convert the pending span captured at selection time
-  // Primary: use the range saved at selection time (survives focus transfer to RN)
+  // Primary: use the range saved at selection time (survives focus transfer to RN).
+  // A selection that crosses paragraph/list-item boundaries produces a Range whose
+  // start and end sit in different block elements. range.surroundContents() throws
+  // on that (it can't wrap a range that only partially selects a non-text node), and
+  // the old fallback (extractContents + stuff into one <mark>) moved block elements
+  // like <p>/<li> INSIDE an inline <mark>, corrupting the layout. Instead, wrap each
+  // intersecting text node in its own <mark> so paragraph/list structure never moves.
   var range=window.__savedRange;
   if(range){
     window.__savedRange=null;
     try{
-      var mark=makeMark();
-      try{range.surroundContents(mark);}
-      catch(e){var frag=range.extractContents();mark.appendChild(frag);range.insertNode(mark);}
+      var root=range.commonAncestorContainer;
+      var entries=[];
+      if(root.nodeType===3){
+        entries.push({node:root,start:range.startOffset,end:range.endOffset});
+      }else{
+        var tw=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
+        var n;
+        while(n=tw.nextNode()){
+          if(!n.nodeValue||!range.intersectsNode(n))continue;
+          if(n.parentNode&&n.parentNode.tagName==='MARK')continue;
+          var st=(n===range.startContainer)?range.startOffset:0;
+          var en=(n===range.endContainer)?range.endOffset:n.nodeValue.length;
+          if(en>st)entries.push({node:n,start:st,end:en});
+        }
+      }
+      if(entries.length===0)throw new Error('no text nodes in range');
+      for(var i=0;i<entries.length;i++){
+        var e=entries[i];
+        var subRange=document.createRange();
+        subRange.setStart(e.node,e.start);
+        subRange.setEnd(e.node,e.end);
+        subRange.surroundContents(makeMark());
+      }
       window.getSelection().removeAllRanges();
       return;
     }catch(e){}
@@ -753,13 +803,32 @@ function applyHighlightsToHtml(html: string, highlights: HighlightRow[]): string
   let result = html;
   for (const h of highlights) {
     if (!h.selected_text.trim()) continue;
-    const escaped = h.selected_text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    try {
-      result = result.replace(
-        new RegExp(escaped, 'g'),
-        `<mark data-highlight-id="${h.id}" style="background:${h.color}55;border-radius:3px;padding:0 2px;cursor:pointer">${h.selected_text}</mark>`,
-      );
-    } catch {}
+    const style = `background:${h.color}55;border-radius:3px;padding:0 2px;cursor:pointer`;
+    // A highlight that spans a paragraph/list-item break has one or more newlines in
+    // selected_text (that's how Selection.toString() joins text across block elements).
+    // The raw HTML has real </p><p>/</li><li> tags in between, not a bare newline, so a
+    // single regex over the whole string never matches and the highlight silently fails
+    // to re-apply on reload — wrap each block's chunk separately instead, same as the
+    // live in-DOM highlighting already does per text node.
+    const chunks = h.selected_text.split(/\r?\n+/).map((c) => c.trim()).filter(Boolean);
+    for (const chunk of chunks) {
+      // Selection.toString() only captures plain text, so if this chunk's span in the
+      // raw HTML has any inline markup inside it (a link, <em>, <strong>, ...) — common
+      // in real article bodies, especially past the first sentence — a literal match on
+      // the plain text fails silently. Match word-by-word instead, allowing any run of
+      // whitespace/inline tags between words, then wrap whatever actually matched
+      // (tags included — nesting inline elements inside <mark> is valid).
+      const words = chunk.split(/\s+/).filter(Boolean)
+        .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      if (words.length === 0) continue;
+      const pattern = words.join('(?:\\s|<[^>]+>)+');
+      try {
+        result = result.replace(
+          new RegExp(pattern, 'g'),
+          (match) => `<mark data-highlight-id="${h.id}" style="${style}">${match}</mark>`,
+        );
+      } catch {}
+    }
   }
   return result;
 }

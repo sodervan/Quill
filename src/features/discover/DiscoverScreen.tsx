@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, DeviceEventEmitter, FlatList, KeyboardAvoidingView, Modal, Platform,
+  ActivityIndicator, DeviceEventEmitter, FlatList, Keyboard, KeyboardAvoidingView, Modal, Platform,
   ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, StatusBar,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -10,7 +10,7 @@ import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 import { type as T, space, radius, shadow } from '../../theme';
 import { useColors } from '../../theme/ThemeContext';
-import { PUBLICATIONS, TOPICS } from '../../data/publications';
+import { PUBLICATIONS, TOPICS, type Publication } from '../../data/publications';
 import {
   followPublication, getFollowedIds, unfollowPublication,
   upsertRemoteSource, getAllRemoteSources, RemoteSourceRow,
@@ -20,6 +20,7 @@ import { fetchFeed, FeedItem } from '../../data/rss';
 import { scrapeForArticles, deriveBlogUrl } from '../../data/scraper';
 import { ArticleRow, upsertArticles } from '../../data/db';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
+import { AppAlert } from '../../components/AppAlert';
 import { db, auth } from '../../lib/firebase';
 
 const PAGE_SIZE = 15;
@@ -61,6 +62,10 @@ export default function DiscoverScreen() {
   const colors = useColors();
   const s = useMemo(() => createDiscoverStyles(colors), [colors]);
   const [followedIds, setFollowedIds] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState<'browse' | 'search'>('browse');
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  const searchListRef = useRef<FlatList<RemoteSource>>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
@@ -80,6 +85,24 @@ export default function DiscoverScreen() {
   const [addLoading, setAddLoading] = useState(false);
   const [addStatus, setAddStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [addStatusMsg, setAddStatusMsg] = useState('');
+
+  // Android's adjustResize is unreliable once a screen is deep inside a FlatList footer —
+  // track the keyboard's real height ourselves and pad the scroll content by exactly that
+  // much, so there's always genuine room to scroll the input above the keyboard.
+  const [kbHeight, setKbHeight] = useState(0);
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
+      setKbHeight(e.endCoordinates.height);
+      // Fires once the keyboard (and the extra padding it triggers) has actually
+      // settled, so the scroll range is accurate — more reliable than a guessed delay.
+      if (activeTabRef.current === 'search') {
+        requestAnimationFrame(() => searchListRef.current?.scrollToEnd({ animated: true }));
+      }
+    });
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => setKbHeight(0));
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, []);
 
   // Feed suggestion modal
   const [showSuggestModal, setShowSuggestModal] = useState(false);
@@ -180,6 +203,24 @@ export default function DiscoverScreen() {
     }
   }
 
+  // Follow buttons for remote sources ("From the web" recs + Search Online results) used
+  // to disable themselves once followed, with no way back — this toggles instead.
+  async function toggleFollowRemote(src: RemoteSource) {
+    const id = makeRemoteId(src.feedUrl);
+    if (followingRemote.has(id)) return;
+    if (!followedIds.has(id)) {
+      await followRemote(src);
+      return;
+    }
+    setFollowingRemote((s) => new Set(s).add(id));
+    try {
+      await unfollowPublication(id);
+      setFollowedIds((s) => { const n = new Set(s); n.delete(id); return n; });
+    } finally {
+      setFollowingRemote((s) => { const n = new Set(s); n.delete(id); return n; });
+    }
+  }
+
   async function addByUrl() {
     const raw = addUrl.trim();
     if (!raw) return;
@@ -241,39 +282,32 @@ export default function DiscoverScreen() {
 
   async function submitFeedSuggestion() {
     if (!suggestUrl.trim()) {
-      Alert.alert('Missing URL', 'Please enter a feed URL');
+      AppAlert.alert('Missing URL', 'Please enter a feed URL');
       return;
     }
 
     // Basic URL validation
     const urlPattern = /^https?:\/\/.+/i;
     if (!urlPattern.test(suggestUrl.trim())) {
-      Alert.alert('Invalid URL', 'Please enter a valid URL starting with http:// or https://');
+      AppAlert.alert('Invalid URL', 'Please enter a valid URL starting with http:// or https://');
       return;
     }
 
-    // Check if user is logged in
-    if (!auth.currentUser) {
-      Alert.alert(
-        'Sign In Required',
-        'You need to be signed in to suggest feeds. Please sign in from your profile.',
-        [{ text: 'OK' }]
-      );
-      return;
-    }
-
+    // No sign-in requirement — this app fully supports offline/guest use elsewhere
+    // (reading, saving, highlighting all work without an account), so suggestions
+    // shouldn't be gated behind one either. Attribute to the account when signed in.
     setSubmitting(true);
     try {
       await addDoc(collection(db, 'feed_suggestions'), {
-        userId: auth.currentUser.uid,
-        userEmail: auth.currentUser.email || null,
+        userId: auth.currentUser?.uid ?? null,
+        userEmail: auth.currentUser?.email ?? null,
         feedUrl: suggestUrl.trim(),
         description: suggestDescription.trim() || null,
         status: 'pending',
         submittedAt: serverTimestamp(),
       });
 
-      Alert.alert(
+      AppAlert.alert(
         'Thanks! 🎉',
         `Your feed suggestion has been submitted. We'll review it and add it if it's a good fit.`,
         [{ text: 'OK' }]
@@ -283,9 +317,15 @@ export default function DiscoverScreen() {
       setSuggestUrl('');
       setSuggestDescription('');
       setShowSuggestModal(false);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to submit feed suggestion:', error);
-      Alert.alert('Error', 'Failed to submit your suggestion. Please try again.');
+      const isPermissionError = error?.code === 'permission-denied';
+      AppAlert.alert(
+        'Error',
+        isPermissionError
+          ? "We couldn't submit that — this feature isn't fully set up on our end yet. Sorry about that!"
+          : 'Failed to submit your suggestion. Check your connection and try again.',
+      );
     } finally {
       setSubmitting(false);
     }
@@ -307,333 +347,388 @@ export default function DiscoverScreen() {
   const visible = filtered.slice(0, visibleCount);
   const hasMore = visibleCount < filtered.length;
 
+  function renderPubItem({ item }: { item: Publication }) {
+    const followed = followedIds.has(item.id);
+    const c = item.color;
+    return (
+      <View style={s.card}>
+        <LinearGradient colors={[c + '0A', 'transparent']} style={StyleSheet.absoluteFill} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} />
+        <View style={[s.avatar, { backgroundColor: c + '18', borderColor: c + '40' }]}>
+          <FaviconAvatar feedUrl={item.feedUrl} emoji={item.emoji} size={52} />
+        </View>
+        <View style={s.info}>
+          <View style={s.nameRow}>
+            <Text style={s.pubName}>{item.name}</Text>
+            {followed && <View style={[s.dot, { backgroundColor: colors.success }]} />}
+          </View>
+          <Text style={s.pubAuthor}>{item.author}</Text>
+          <Text style={s.pubDesc} numberOfLines={2}>{item.description}</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={s.topicRow}>
+            {item.topics.map((t) => {
+              const topic = TOPICS.find((x) => x.id === t);
+              return (
+                <View key={t} style={s.topicTag}>
+                  {topic?.emoji ? <Text style={s.topicTagEmoji}>{topic.emoji}</Text> : null}
+                  <Text style={s.topicTagText}>{topic?.label ?? t}</Text>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+        <TouchableOpacity
+          style={[s.followBtn, followed ? { backgroundColor: c + '20', borderColor: c + '50' } : { backgroundColor: c, borderColor: c }]}
+          onPress={() => toggle(item.id)}
+          activeOpacity={0.8}
+        >
+          <Ionicons name={followed ? 'checkmark' : 'add'} size={18} color={followed ? c : colors.bgDeep} />
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  function renderWebItem({ item: src }: { item: RemoteSource }) {
+    const id = makeRemoteId(src.feedUrl);
+    const isF = followedIds.has(id);
+    const isFing = followingRemote.has(id);
+    const c = pickColor(src.feedUrl);
+    return (
+      <View style={s.webCard}>
+        <View style={[s.webAvatar, { backgroundColor: c + '22' }]}>
+          <FaviconAvatar feedUrl={src.feedUrl} emoji="📰" size={44} />
+        </View>
+        <View style={s.webInfo}>
+          <Text style={s.webName} numberOfLines={1}>{src.name}</Text>
+          {src.subscribers > 0 && (
+            <Text style={s.webSubs}>{src.subscribers.toLocaleString()} readers</Text>
+          )}
+          {src.description ? (
+            <Text style={s.webDesc} numberOfLines={2}>{src.description}</Text>
+          ) : null}
+        </View>
+        <TouchableOpacity
+          onPress={() => toggleFollowRemote(src)}
+          disabled={isFing}
+          style={[s.webFollowBtn, isF && s.webFollowBtnActive]}
+        >
+          {isFing
+            ? <ActivityIndicator size={12} color={isF ? colors.success : colors.accent} />
+            : <Ionicons
+                name={isF ? 'checkmark' : 'add'}
+                size={18}
+                color={isF ? colors.success : colors.bgDeep}
+              />
+          }
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // Shared across both tabs — header + "From the web" recs + the tab switcher itself,
+  // followed by the tab-specific search control (curated search+filters vs. web search box).
+  const sharedHeader = (
+    <View>
+      <View style={s.header}>
+        <View>
+          <Text style={s.headerLabel}>BROWSE</Text>
+          <Text style={s.headerTitle}>Discover</Text>
+        </View>
+        <View style={s.followingBadge}>
+          <Ionicons name="people-outline" size={14} color={colors.accent} />
+          <Text style={s.followingText}>{followedIds.size} following</Text>
+        </View>
+      </View>
+
+      {/* ── Online recommendations ── */}
+      {(recLoading || recResults.length > 0) && (
+        <View style={s.recSection}>
+          <View style={s.recHeader}>
+            <Ionicons name="globe-outline" size={13} color={colors.accent} />
+            <Text style={s.recTitle}>From the web</Text>
+            {recLoading
+              ? <ActivityIndicator size={10} color={colors.accent} style={{ marginLeft: 6 }} />
+              : (
+                <TouchableOpacity onPress={refreshRecs} hitSlop={8} style={{ marginLeft: 6 }}>
+                  <Ionicons name="refresh-outline" size={14} color={colors.textMuted} />
+                </TouchableOpacity>
+              )
+            }
+          </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={s.recRow}
+          >
+            {recResults.map((src) => {
+              const id = makeRemoteId(src.feedUrl);
+              const isF = followedIds.has(id);
+              const isFing = followingRemote.has(id);
+              const c = pickColor(src.feedUrl);
+              const subLabel = src.subscribers >= 1000
+                ? `${Math.round(src.subscribers / 1000)}k readers`
+                : src.subscribers > 0 ? `${src.subscribers} readers` : null;
+              return (
+                <View key={src.feedUrl} style={s.recCard}>
+                  <View style={{ gap: 8 }}>
+                    <View style={s.recCardTop}>
+                      <View style={[s.recAvatar, { backgroundColor: c + '22' }]}>
+                        <FaviconAvatar feedUrl={src.feedUrl} emoji="📰" size={28} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.recName} numberOfLines={1}>{src.name}</Text>
+                        {subLabel && <Text style={s.recSubs}>{subLabel}</Text>}
+                      </View>
+                    </View>
+                    {src.description ? (
+                      <Text style={s.recDesc} numberOfLines={3}>{src.description}</Text>
+                    ) : null}
+                  </View>
+                  <TouchableOpacity
+                    style={[s.recFollowBtn, { backgroundColor: isF ? colors.success + '20' : c, borderColor: isF ? colors.success + '60' : c }]}
+                    onPress={() => toggleFollowRemote(src)}
+                    disabled={isFing}
+                  >
+                    {isFing
+                      ? <ActivityIndicator size={10} color={isF ? colors.success : colors.bgDeep} />
+                      : <Ionicons name={isF ? 'checkmark' : 'add'} size={13} color={isF ? colors.success : colors.bgDeep} />
+                    }
+                    {!isFing && (
+                      <Text style={[s.recFollowText, { color: isF ? colors.success : colors.bgDeep }]}>
+                        {isF ? 'Following' : 'Follow'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* ── Browse curated / Search online tabs ── */}
+      <View style={s.tabRow}>
+        <TouchableOpacity
+          style={[s.tabBtn, activeTab === 'browse' && s.tabBtnActive]}
+          onPress={() => setActiveTab('browse')}
+        >
+          <Ionicons name="library-outline" size={15} color={activeTab === 'browse' ? colors.accent : colors.textMuted} />
+          <Text style={[s.tabLabel, activeTab === 'browse' && { color: colors.accent }]}>Browse</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[s.tabBtn, activeTab === 'search' && s.tabBtnActive]}
+          onPress={() => setActiveTab('search')}
+        >
+          <Ionicons name="globe-outline" size={15} color={activeTab === 'search' ? colors.accent : colors.textMuted} />
+          <Text style={[s.tabLabel, activeTab === 'search' && { color: colors.accent }]}>Search Online</Text>
+        </TouchableOpacity>
+      </View>
+
+      {activeTab === 'browse' ? (
+        <>
+          <View style={s.searchRow}>
+            <Ionicons name="search-outline" size={18} color={colors.textMuted} style={{ marginRight: 8 }} />
+            <TextInput
+              style={s.searchInput}
+              placeholder="Search publications…"
+              placeholderTextColor={colors.textMuted}
+              value={query}
+              onChangeText={(t) => { setQuery(t); setVisibleCount(PAGE_SIZE); }}
+              returnKeyType="search"
+            />
+            {query.length > 0 && (
+              <TouchableOpacity onPress={() => setQuery('')} hitSlop={8}>
+                <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <FlatList
+            horizontal
+            data={[{ id: null as string | null, label: 'All', emoji: '✦', color: colors.accent }, ...TOPICS.map((t) => ({ ...t, id: t.id as string | null }))]}
+            keyExtractor={(t) => String(t.id)}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={s.filterRow}
+            renderItem={({ item }) => {
+              const active = activeFilter === item.id;
+              return (
+                <TouchableOpacity
+                  style={[s.filterChip, active && { backgroundColor: item.color + '22', borderColor: item.color + '70' }]}
+                  onPress={() => { setActiveFilter(active ? null : item.id); setVisibleCount(PAGE_SIZE); }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={s.filterEmoji}>{item.emoji}</Text>
+                  <Text style={[s.filterText, active && { color: item.color }]}>{item.label}</Text>
+                </TouchableOpacity>
+              );
+            }}
+          />
+
+          <Text style={s.resultCount}>
+            {filtered.length} publication{filtered.length !== 1 ? 's' : ''}
+            {activeFilter ? ` in ${TOPICS.find((t) => t.id === activeFilter)?.label}` : ''}
+          </Text>
+        </>
+      ) : (
+        <View style={s.webSearchRow}>
+          <Ionicons name="search-outline" size={16} color={colors.textMuted} style={{ marginRight: 8 }} />
+          <TextInput
+            style={s.webSearchInput}
+            placeholder="e.g. climate science, fintech, indie dev…"
+            placeholderTextColor={colors.textMuted}
+            value={webQuery}
+            onChangeText={setWebQuery}
+            onSubmitEditing={doWebSearch}
+            returnKeyType="search"
+            autoCapitalize="none"
+          />
+          <TouchableOpacity onPress={doWebSearch} style={s.webSearchBtn} disabled={webLoading}>
+            {webLoading
+              ? <ActivityIndicator size={14} color={colors.accent} />
+              : <Text style={s.webSearchBtnText}>Search</Text>
+            }
+          </TouchableOpacity>
+        </View>
+      )}
+    </View>
+  );
+
+  // Persistent regardless of tab — suggesting a feed is equally relevant whether
+  // you were browsing the curated list or searching online and came up empty.
+  const suggestFeedBtn = (
+    <TouchableOpacity
+      style={s.suggestBtn}
+      onPress={() => setShowSuggestModal(true)}
+      activeOpacity={0.8}
+    >
+      <LinearGradient
+        colors={[colors.accent + '15', colors.accent + '08']}
+        style={StyleSheet.absoluteFill}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+      />
+      <Ionicons name="bulb-outline" size={18} color={colors.accent} />
+      <Text style={s.suggestBtnText}>Suggest a Feed</Text>
+      <Text style={s.suggestBtnSub}>Help us expand our catalog</Text>
+    </TouchableOpacity>
+  );
+
+  const browseFooter = (
+    <View>
+      {hasMore ? (
+        <TouchableOpacity style={s.loadMore} onPress={() => setVisibleCount((n) => n + PAGE_SIZE)}>
+          <LinearGradient colors={[colors.accentMuted, 'transparent']} style={StyleSheet.absoluteFill} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} />
+          <Ionicons name="add-circle-outline" size={20} color={colors.accent} />
+          <Text style={s.loadMoreText}>Load {Math.min(PAGE_SIZE, filtered.length - visibleCount)} more</Text>
+        </TouchableOpacity>
+      ) : (
+        <View style={s.allLoaded}>
+          <Text style={s.allLoadedText}>✦ All {filtered.length} curated sources shown</Text>
+        </View>
+      )}
+      {suggestFeedBtn}
+      <View style={{ height: 100 }} />
+    </View>
+  );
+
+  // Add by URL lives here — it's the fallback for when searching online doesn't
+  // turn up the feed you already have a direct link to.
+  const searchFooter = (
+    <View>
+      <View style={[s.addUrlCard, webResults.length === 0 && { marginTop: 0 }]}>
+        <LinearGradient
+          colors={[colors.accent + '12', 'transparent']}
+          style={StyleSheet.absoluteFill}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+        />
+        <View style={s.addUrlHeader}>
+          <Ionicons name="link-outline" size={16} color={colors.accent} />
+          <Text style={s.addUrlTitle}>Add by URL</Text>
+          <Text style={s.addUrlSub}>Paste any blog or RSS feed link</Text>
+        </View>
+        <View style={s.addUrlRow}>
+          <TextInput
+            style={s.addUrlInput}
+            placeholder="https://example.com/feed"
+            placeholderTextColor={colors.textMuted}
+            value={addUrl}
+            onChangeText={(t) => { setAddUrl(t); setAddStatus('idle'); }}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            returnKeyType="go"
+            onSubmitEditing={addByUrl}
+          />
+          <TouchableOpacity
+            style={[s.addUrlBtn, addLoading && { opacity: 0.6 }]}
+            onPress={addByUrl}
+            disabled={addLoading}
+          >
+            {addLoading
+              ? <ActivityIndicator size={14} color={colors.bgDeep} />
+              : <Ionicons name="arrow-forward" size={16} color={colors.bgDeep} />
+            }
+          </TouchableOpacity>
+        </View>
+        {addStatus !== 'idle' && (
+          <View style={[s.addStatusRow, { backgroundColor: addStatus === 'success' ? colors.success + '18' : colors.danger + '18' }]}>
+            <Ionicons
+              name={addStatus === 'success' ? 'checkmark-circle' : 'alert-circle-outline'}
+              size={14}
+              color={addStatus === 'success' ? colors.success : colors.danger}
+            />
+            <Text style={[s.addStatusText, { color: addStatus === 'success' ? colors.success : colors.danger }]}>
+              {addStatusMsg}
+            </Text>
+          </View>
+        )}
+      </View>
+
+      {suggestFeedBtn}
+      <View style={{ height: 100 }} />
+    </View>
+  );
+
   return (
     <KeyboardAvoidingView style={s.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <StatusBar barStyle="light-content" backgroundColor={colors.bgDeep} />
       <LinearGradient colors={[colors.bgDeep, colors.bg]} style={StyleSheet.absoluteFill} />
 
-      <FlatList
-        data={visible}
-        keyExtractor={(p) => p.id}
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={s.list}
-        keyboardShouldPersistTaps="handled"
-        ListHeaderComponent={
-          <View>
-            <View style={s.header}>
-              <View>
-                <Text style={s.headerLabel}>BROWSE</Text>
-                <Text style={s.headerTitle}>Discover</Text>
-              </View>
-              <View style={s.followingBadge}>
-                <Ionicons name="people-outline" size={14} color={colors.accent} />
-                <Text style={s.followingText}>{followedIds.size} following</Text>
-              </View>
+      {activeTab === 'browse' ? (
+        <FlatList
+          data={visible}
+          keyExtractor={(p) => p.id}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={s.list}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={sharedHeader}
+          renderItem={renderPubItem}
+          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          ListFooterComponent={browseFooter}
+        />
+      ) : (
+        <FlatList
+          ref={searchListRef}
+          data={webResults}
+          keyExtractor={(src) => src.feedUrl}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[s.list, kbHeight > 0 && { paddingBottom: 20 + kbHeight }]}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={sharedHeader}
+          renderItem={renderWebItem}
+          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          ListEmptyComponent={!webLoading ? (
+            <View style={s.searchEmpty}>
+              <Ionicons name="search-outline" size={30} color={colors.textMuted} />
+              <Text style={s.searchEmptyText}>
+                {webQuery.trim()
+                  ? 'No results — try a different search, or paste the feed URL directly below.'
+                  : 'Search for a topic, blog, or publication name to find feeds from around the web.'}
+              </Text>
             </View>
-
-            {/* ── Online recommendations ── */}
-            {(recLoading || recResults.length > 0) && (
-              <View style={s.recSection}>
-                <View style={s.recHeader}>
-                  <Ionicons name="globe-outline" size={13} color={colors.accent} />
-                  <Text style={s.recTitle}>From the web</Text>
-                  {recLoading
-                    ? <ActivityIndicator size={10} color={colors.accent} style={{ marginLeft: 6 }} />
-                    : (
-                      <TouchableOpacity onPress={refreshRecs} hitSlop={8} style={{ marginLeft: 6 }}>
-                        <Ionicons name="refresh-outline" size={14} color={colors.textMuted} />
-                      </TouchableOpacity>
-                    )
-                  }
-                </View>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={s.recRow}
-                >
-                  {recResults.map((src) => {
-                    const id = makeRemoteId(src.feedUrl);
-                    const isF = followedIds.has(id);
-                    const isFing = followingRemote.has(id);
-                    const c = pickColor(src.feedUrl);
-                    const subLabel = src.subscribers >= 1000
-                      ? `${Math.round(src.subscribers / 1000)}k readers`
-                      : src.subscribers > 0 ? `${src.subscribers} readers` : null;
-                    return (
-                      <View key={src.feedUrl} style={s.recCard}>
-                        <View style={s.recCardTop}>
-                          <View style={[s.recAvatar, { backgroundColor: c + '22' }]}>
-                            <FaviconAvatar feedUrl={src.feedUrl} emoji="📰" size={28} />
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={s.recName} numberOfLines={1}>{src.name}</Text>
-                            {subLabel && <Text style={s.recSubs}>{subLabel}</Text>}
-                          </View>
-                        </View>
-                        {src.description ? (
-                          <Text style={s.recDesc} numberOfLines={3}>{src.description}</Text>
-                        ) : null}
-                        <TouchableOpacity
-                          style={[s.recFollowBtn, { backgroundColor: isF ? colors.success + '20' : c, borderColor: isF ? colors.success + '60' : c }]}
-                          onPress={() => followRemote(src)}
-                          disabled={isF || isFing}
-                        >
-                          {isFing
-                            ? <ActivityIndicator size={10} color={isF ? colors.success : colors.bgDeep} />
-                            : <Ionicons name={isF ? 'checkmark' : 'add'} size={13} color={isF ? colors.success : colors.bgDeep} />
-                          }
-                          {!isFing && (
-                            <Text style={[s.recFollowText, { color: isF ? colors.success : colors.bgDeep }]}>
-                              {isF ? 'Following' : 'Follow'}
-                            </Text>
-                          )}
-                        </TouchableOpacity>
-                      </View>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            )}
-
-            <View style={s.searchRow}>
-              <Ionicons name="search-outline" size={18} color={colors.textMuted} style={{ marginRight: 8 }} />
-              <TextInput
-                style={s.searchInput}
-                placeholder="Search publications…"
-                placeholderTextColor={colors.textMuted}
-                value={query}
-                onChangeText={(t) => { setQuery(t); setVisibleCount(PAGE_SIZE); }}
-                returnKeyType="search"
-              />
-              {query.length > 0 && (
-                <TouchableOpacity onPress={() => setQuery('')} hitSlop={8}>
-                  <Ionicons name="close-circle" size={18} color={colors.textMuted} />
-                </TouchableOpacity>
-              )}
-            </View>
-
-            <FlatList
-              horizontal
-              data={[{ id: null as string | null, label: 'All', emoji: '✦', color: colors.accent }, ...TOPICS.map((t) => ({ ...t, id: t.id as string | null }))]}
-              keyExtractor={(t) => String(t.id)}
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={s.filterRow}
-              renderItem={({ item }) => {
-                const active = activeFilter === item.id;
-                return (
-                  <TouchableOpacity
-                    style={[s.filterChip, active && { backgroundColor: item.color + '22', borderColor: item.color + '70' }]}
-                    onPress={() => { setActiveFilter(active ? null : item.id); setVisibleCount(PAGE_SIZE); }}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={s.filterEmoji}>{item.emoji}</Text>
-                    <Text style={[s.filterText, active && { color: item.color }]}>{item.label}</Text>
-                  </TouchableOpacity>
-                );
-              }}
-            />
-
-            <Text style={s.resultCount}>
-              {filtered.length} publication{filtered.length !== 1 ? 's' : ''}
-              {activeFilter ? ` in ${TOPICS.find((t) => t.id === activeFilter)?.label}` : ''}
-            </Text>
-          </View>
-        }
-        renderItem={({ item }) => {
-          const followed = followedIds.has(item.id);
-          const c = item.color;
-          return (
-            <View style={s.card}>
-              <LinearGradient colors={[c + '0A', 'transparent']} style={StyleSheet.absoluteFill} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} />
-              <View style={[s.avatar, { backgroundColor: c + '18', borderColor: c + '40' }]}>
-                <FaviconAvatar feedUrl={item.feedUrl} emoji={item.emoji} size={52} />
-              </View>
-              <View style={s.info}>
-                <View style={s.nameRow}>
-                  <Text style={s.pubName}>{item.name}</Text>
-                  {followed && <View style={[s.dot, { backgroundColor: colors.success }]} />}
-                </View>
-                <Text style={s.pubAuthor}>{item.author}</Text>
-                <Text style={s.pubDesc} numberOfLines={2}>{item.description}</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={s.topicRow}>
-                  {item.topics.map((t) => {
-                    const topic = TOPICS.find((x) => x.id === t);
-                    return (
-                      <View key={t} style={s.topicTag}>
-                        <Text style={s.topicTagText}>{topic?.emoji} {topic?.label ?? t}</Text>
-                      </View>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-              <TouchableOpacity
-                style={[s.followBtn, followed ? { backgroundColor: c + '20', borderColor: c + '50' } : { backgroundColor: c, borderColor: c }]}
-                onPress={() => toggle(item.id)}
-                activeOpacity={0.8}
-              >
-                <Ionicons name={followed ? 'checkmark' : 'add'} size={18} color={followed ? c : colors.bgDeep} />
-              </TouchableOpacity>
-            </View>
-          );
-        }}
-        ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-        ListFooterComponent={
-          <View>
-            {hasMore ? (
-              <TouchableOpacity style={s.loadMore} onPress={() => setVisibleCount((n) => n + PAGE_SIZE)}>
-                <LinearGradient colors={[colors.accentMuted, 'transparent']} style={StyleSheet.absoluteFill} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} />
-                <Ionicons name="add-circle-outline" size={20} color={colors.accent} />
-                <Text style={s.loadMoreText}>Load {Math.min(PAGE_SIZE, filtered.length - visibleCount)} more</Text>
-              </TouchableOpacity>
-            ) : (
-              <View style={s.allLoaded}>
-                <Text style={s.allLoadedText}>✦ All {filtered.length} curated sources shown</Text>
-              </View>
-            )}
-
-            {/* ── Search the web for more ── */}
-            <View style={s.webSection}>
-              <View style={s.webDivider}>
-                <View style={s.divLine} />
-                <Ionicons name="globe-outline" size={14} color={colors.textMuted} style={{ marginHorizontal: 8 }} />
-                <Text style={s.divLabel}>Search the web for more</Text>
-                <View style={s.divLine} />
-              </View>
-
-              <View style={s.webSearchRow}>
-                <Ionicons name="search-outline" size={16} color={colors.textMuted} style={{ marginRight: 8 }} />
-                <TextInput
-                  style={s.webSearchInput}
-                  placeholder="e.g. climate science, fintech, indie dev…"
-                  placeholderTextColor={colors.textMuted}
-                  value={webQuery}
-                  onChangeText={setWebQuery}
-                  onSubmitEditing={doWebSearch}
-                  returnKeyType="search"
-                  autoCapitalize="none"
-                />
-                <TouchableOpacity onPress={doWebSearch} style={s.webSearchBtn} disabled={webLoading}>
-                  {webLoading
-                    ? <ActivityIndicator size={14} color={colors.accent} />
-                    : <Text style={s.webSearchBtnText}>Search</Text>
-                  }
-                </TouchableOpacity>
-              </View>
-
-              {webResults.length > 0 && (
-                <View style={{ marginTop: space.sm }}>
-                  {webResults.map((src) => {
-                    const id = makeRemoteId(src.feedUrl);
-                    const isF = followedIds.has(id);
-                    const isFing = followingRemote.has(id);
-                    const c = pickColor(src.feedUrl);
-                    return (
-                      <View key={src.feedUrl} style={s.webCard}>
-                        <View style={[s.webAvatar, { backgroundColor: c + '22' }]}>
-                          <FaviconAvatar feedUrl={src.feedUrl} emoji="📰" size={44} />
-                        </View>
-                        <View style={s.webInfo}>
-                          <Text style={s.webName} numberOfLines={1}>{src.name}</Text>
-                          {src.subscribers > 0 && (
-                            <Text style={s.webSubs}>{src.subscribers.toLocaleString()} readers</Text>
-                          )}
-                          {src.description ? (
-                            <Text style={s.webDesc} numberOfLines={2}>{src.description}</Text>
-                          ) : null}
-                        </View>
-                        <TouchableOpacity
-                          onPress={() => followRemote(src)}
-                          disabled={isF || isFing}
-                          style={[s.webFollowBtn, isF && s.webFollowBtnActive]}
-                        >
-                          {isFing
-                            ? <ActivityIndicator size={12} color={isF ? colors.success : colors.accent} />
-                            : <Ionicons
-                                name={isF ? 'checkmark' : 'add'}
-                                size={18}
-                                color={isF ? colors.success : colors.bgDeep}
-                              />
-                          }
-                        </TouchableOpacity>
-                      </View>
-                    );
-                  })}
-                </View>
-              )}
-
-              {/* ── Add by URL ── */}
-              <View style={s.addUrlCard}>
-                <LinearGradient
-                  colors={[colors.accent + '12', 'transparent']}
-                  style={StyleSheet.absoluteFill}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                />
-                <View style={s.addUrlHeader}>
-                  <Ionicons name="link-outline" size={16} color={colors.accent} />
-                  <Text style={s.addUrlTitle}>Add by URL</Text>
-                  <Text style={s.addUrlSub}>Paste any blog or RSS feed link</Text>
-                </View>
-                <View style={s.addUrlRow}>
-                  <TextInput
-                    style={s.addUrlInput}
-                    placeholder="https://example.com/feed"
-                    placeholderTextColor={colors.textMuted}
-                    value={addUrl}
-                    onChangeText={(t) => { setAddUrl(t); setAddStatus('idle'); }}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    keyboardType="url"
-                    returnKeyType="go"
-                    onSubmitEditing={addByUrl}
-                  />
-                  <TouchableOpacity
-                    style={[s.addUrlBtn, addLoading && { opacity: 0.6 }]}
-                    onPress={addByUrl}
-                    disabled={addLoading}
-                  >
-                    {addLoading
-                      ? <ActivityIndicator size={14} color={colors.bgDeep} />
-                      : <Ionicons name="arrow-forward" size={16} color={colors.bgDeep} />
-                    }
-                  </TouchableOpacity>
-                </View>
-                {addStatus !== 'idle' && (
-                  <View style={[s.addStatusRow, { backgroundColor: addStatus === 'success' ? colors.success + '18' : colors.error + '18' }]}>
-                    <Ionicons
-                      name={addStatus === 'success' ? 'checkmark-circle' : 'alert-circle-outline'}
-                      size={14}
-                      color={addStatus === 'success' ? colors.success : colors.error ?? '#EF4444'}
-                    />
-                    <Text style={[s.addStatusText, { color: addStatus === 'success' ? colors.success : colors.error ?? '#EF4444' }]}>
-                      {addStatusMsg}
-                    </Text>
-                  </View>
-                )}
-              </View>
-
-              {/* ── Suggest a feed button ── */}
-              <TouchableOpacity
-                style={s.suggestBtn}
-                onPress={() => setShowSuggestModal(true)}
-                activeOpacity={0.8}
-              >
-                <LinearGradient
-                  colors={[colors.accent + '15', colors.accent + '08']}
-                  style={StyleSheet.absoluteFill}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                />
-                <Ionicons name="bulb-outline" size={18} color={colors.accent} />
-                <Text style={s.suggestBtnText}>Suggest a Feed</Text>
-                <Text style={s.suggestBtnSub}>Help us expand our catalog</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ height: 100 }} />
-          </View>
-        }
-      />
+          ) : null}
+          ListFooterComponent={searchFooter}
+        />
+      )}
 
       {/* ── Feed Suggestion Modal ── */}
       <Modal
@@ -642,9 +737,12 @@ export default function DiscoverScreen() {
         animationType="fade"
         onRequestClose={() => setShowSuggestModal(false)}
       >
+        {/* Inside a Modal, Android's adjustResize (which normal screens rely on) doesn't
+            apply — Modal opens its own native window. 'height' is the fix that actually
+            works here; 'undefined' (fine on the root screen) would leave inputs uncovered. */}
         <KeyboardAvoidingView
           style={s.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
           <TouchableOpacity
             style={StyleSheet.absoluteFill}
@@ -733,8 +831,11 @@ export default function DiscoverScreen() {
 function createDiscoverStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bgDeep },
   header: {
+    // No horizontal padding here — this sits inside the FlatList's ListHeaderComponent,
+    // which already gets paddingHorizontal from `list` below. Adding more here double-pads
+    // it against the outer edge, throwing it out of alignment with everything below it.
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: space.lg, paddingTop: 60, paddingBottom: space.md,
+    paddingTop: 60, paddingBottom: space.md,
   },
   headerLabel: { ...T.label, color: colors.accent, marginBottom: 2 },
   headerTitle: { ...T.d2, color: colors.text },
@@ -744,6 +845,20 @@ function createDiscoverStyles(colors: ReturnType<typeof useColors>) { return Sty
     paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: colors.accentBorder,
   },
   followingText: { ...T.badge, color: colors.accent },
+
+  // Browse / Search Online tabs
+  tabRow: {
+    flexDirection: 'row', marginBottom: space.md,
+    backgroundColor: colors.surface, borderRadius: radius.lg,
+    borderWidth: 1, borderColor: colors.border, padding: 4, gap: 4,
+  },
+  tabBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6, paddingVertical: 9, borderRadius: radius.md,
+  },
+  tabBtnActive: { backgroundColor: colors.surfaceHigher },
+  tabLabel: { ...T.label, color: colors.textMuted, fontWeight: '600' },
+
   searchRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: colors.surface, borderRadius: radius.lg,
@@ -782,9 +897,11 @@ function createDiscoverStyles(colors: ReturnType<typeof useColors>) { return Sty
   pubDesc: { ...T.caption, color: colors.textSecondary, lineHeight: 18, marginBottom: 8 },
   topicRow: { flexDirection: 'row', gap: 4, paddingRight: 4 },
   topicTag: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
     borderRadius: radius.full, paddingHorizontal: 8, paddingVertical: 3, flexShrink: 0,
     backgroundColor: colors.surfaceHigher, borderWidth: 1, borderColor: colors.borderStrong,
   },
+  topicTagEmoji: { fontSize: 11, lineHeight: 14 },
   topicTagText: { fontSize: 10, fontWeight: '600', color: colors.textSecondary },
   followBtn: {
     width: 36, height: 36, borderRadius: 18,
@@ -805,9 +922,9 @@ function createDiscoverStyles(colors: ReturnType<typeof useColors>) { return Sty
   recTitle: { ...T.label, color: colors.accent },
   recRow: { gap: 10, paddingRight: space.md },
   recCard: {
-    width: 176, backgroundColor: colors.surface, borderRadius: radius.lg,
+    width: 176, height: 156, backgroundColor: colors.surface, borderRadius: radius.lg,
     borderWidth: 1, borderColor: colors.border, padding: 12,
-    gap: 8, ...shadow.card,
+    ...shadow.card,
   },
   recCardTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   recAvatar: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
@@ -816,6 +933,7 @@ function createDiscoverStyles(colors: ReturnType<typeof useColors>) { return Sty
   recDesc: { fontSize: 12, color: colors.textSecondary, lineHeight: 17 },
   recFollowBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start' as const,
+    marginTop: 'auto' as const,
     paddingVertical: 5, paddingHorizontal: 10,
     borderRadius: radius.full, borderWidth: 1,
   },
@@ -840,6 +958,11 @@ function createDiscoverStyles(colors: ReturnType<typeof useColors>) { return Sty
     borderWidth: 1, borderColor: colors.accentBorder,
   },
   webSearchBtnText: { ...T.caption, color: colors.accent, fontWeight: '700' },
+  searchEmpty: {
+    alignItems: 'center', justifyContent: 'center',
+    paddingVertical: space.xl, paddingHorizontal: space.lg, gap: 10,
+  },
+  searchEmptyText: { ...T.caption, color: colors.textMuted, textAlign: 'center', lineHeight: 19 },
   webCard: {
     flexDirection: 'row', alignItems: 'flex-start', gap: 12,
     backgroundColor: colors.surface, borderRadius: radius.lg,

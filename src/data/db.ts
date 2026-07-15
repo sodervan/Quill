@@ -73,7 +73,8 @@ export async function initDb(): Promise<void> {
     CREATE TABLE IF NOT EXISTS daily_log (
       date TEXT PRIMARY KEY,
       qualifying_reads INTEGER NOT NULL DEFAULT 0,
-      pages_read INTEGER NOT NULL DEFAULT 0
+      pages_read INTEGER NOT NULL DEFAULT 0,
+      reading_seconds INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS settings (
@@ -183,7 +184,25 @@ export async function initDb(): Promise<void> {
     } catch {}
   }
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '14')`);
+  // v15: add reading_seconds to daily_log (syncable aggregate) and backfill it from the
+  //      existing local read_events log, which was never synced to the cloud
+  if (verNum < 15) {
+    try { await db.execAsync(`ALTER TABLE daily_log ADD COLUMN reading_seconds INTEGER NOT NULL DEFAULT 0`); } catch {}
+    try {
+      await db.execAsync(`
+        INSERT OR IGNORE INTO daily_log (date, qualifying_reads, pages_read, reading_seconds)
+        SELECT DISTINCT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch', 'localtime'), 0, 0, 0
+        FROM read_events;
+
+        UPDATE daily_log SET reading_seconds = (
+          SELECT COALESCE(SUM(re.seconds_read), 0) FROM read_events re
+          WHERE strftime('%Y-%m-%d', re.created_at / 1000, 'unixepoch', 'localtime') = daily_log.date
+        );
+      `);
+    } catch {}
+  }
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '15')`);
 }
 
 // --- Settings helpers ---
@@ -197,6 +216,39 @@ export async function getSetting(key: string): Promise<string | null> {
 export async function setSetting(key: string, value: string): Promise<void> {
   const db = getDb();
   await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, [key, value]);
+}
+
+// --- Account switching ---
+// The local SQLite DB is a single unscoped cache — it doesn't inherently know which
+// account's data it holds. synced_uid records whose data is currently cached locally,
+// so that signing into a DIFFERENT account can detect the mismatch and wipe the stale
+// cache first, instead of uploading one account's reading history into another's.
+
+export async function getSyncedUid(): Promise<string | null> {
+  return getSetting('synced_uid');
+}
+
+export async function setSyncedUid(uid: string): Promise<void> {
+  await setSetting('synced_uid', uid);
+}
+
+export async function resetLocalUserData(): Promise<void> {
+  const db = getDb();
+  await db.execAsync(`
+    DELETE FROM daily_log;
+    DELETE FROM reading_progress;
+    DELETE FROM read_events;
+    DELETE FROM highlights;
+    DELETE FROM book_highlights;
+    DELETE FROM books;
+    DELETE FROM saved_articles;
+    DELETE FROM followed_publications;
+    DELETE FROM remote_sources;
+    DELETE FROM articles;
+  `);
+  await setSetting('daily_goal', '1');
+  await setSetting('goal_explicitly_set', '0');
+  await setSetting('onboarding_done', '0');
 }
 
 // --- Followed publications ---
@@ -329,11 +381,13 @@ export async function recordPageRead(articleId: string, pagesRead: number, total
        ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + excluded.pages_read`,
       [key, delta],
     );
-    const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number }>(
-      `SELECT qualifying_reads, pages_read FROM daily_log WHERE date = ?`, [key],
+    const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number; reading_seconds: number }>(
+      `SELECT qualifying_reads, pages_read, reading_seconds FROM daily_log WHERE date = ?`, [key],
     );
     if (row) {
-      import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads, row.pages_read)).catch(() => {});
+      import('../lib/sync').then((m) =>
+        m.syncDailyLog(key, row.qualifying_reads, row.pages_read, row.reading_seconds ?? 0)
+      ).catch(() => {});
     }
   }
 
@@ -369,11 +423,13 @@ export async function recordScrollProgress(articleId: string, depth: number): Pr
        ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + 1`,
       [key],
     );
-    const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number }>(
-      `SELECT qualifying_reads, pages_read FROM daily_log WHERE date = ?`, [key],
+    const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number; reading_seconds: number }>(
+      `SELECT qualifying_reads, pages_read, reading_seconds FROM daily_log WHERE date = ?`, [key],
     );
     if (row) {
-      import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads, row.pages_read)).catch(() => {});
+      import('../lib/sync').then((m) =>
+        m.syncDailyLog(key, row.qualifying_reads, row.pages_read, row.reading_seconds ?? 0)
+      ).catch(() => {});
     }
   }
 
@@ -394,28 +450,32 @@ export async function logReadEvent(
      VALUES (?, ?, ?, ?, ?)`,
     [articleId, secondsRead, scrollDepth, qualifying, Date.now()],
   );
-  if (qualifying) {
-    await incrementDailyLog();
-  }
+  // Always accrue reading time (for the "Time reading" stat); qualifying_reads only
+  // increments when this session met the qualifying bar.
+  await incrementDailyLog(qualifying, secondsRead);
   import('../lib/sync').then((m) =>
     m.syncReadEvent(articleId, secondsRead, scrollDepth, qualifying === 1)
   ).catch(() => {});
 }
 
-async function incrementDailyLog(): Promise<void> {
+async function incrementDailyLog(qualifying: number, secondsRead: number): Promise<void> {
   const db = getDb();
   const key = todayKey();
   await db.runAsync(
-    `INSERT INTO daily_log (date, qualifying_reads) VALUES (?, 1)
-     ON CONFLICT(date) DO UPDATE SET qualifying_reads = qualifying_reads + 1`,
-    [key],
+    `INSERT INTO daily_log (date, qualifying_reads, pages_read, reading_seconds) VALUES (?, ?, 0, ?)
+     ON CONFLICT(date) DO UPDATE SET
+       qualifying_reads = qualifying_reads + excluded.qualifying_reads,
+       reading_seconds = reading_seconds + excluded.reading_seconds`,
+    [key, qualifying, secondsRead],
   );
   // Read the FULL row so pages_read isn't overwritten to 0 in Firestore
-  const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number }>(
-    `SELECT qualifying_reads, pages_read FROM daily_log WHERE date = ?`, [key],
+  const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number; reading_seconds: number }>(
+    `SELECT qualifying_reads, pages_read, reading_seconds FROM daily_log WHERE date = ?`, [key],
   );
   if (row) {
-    import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads, row.pages_read ?? 0)).catch(() => {});
+    import('../lib/sync').then((m) =>
+      m.syncDailyLog(key, row.qualifying_reads, row.pages_read ?? 0, row.reading_seconds ?? 0)
+    ).catch(() => {});
   }
 }
 
@@ -497,11 +557,13 @@ export async function logBookPages(delta: number): Promise<void> {
      ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + excluded.pages_read`,
     [key, delta],
   );
-  const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number }>(
-    `SELECT qualifying_reads, pages_read FROM daily_log WHERE date = ?`, [key],
+  const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number; reading_seconds: number }>(
+    `SELECT qualifying_reads, pages_read, reading_seconds FROM daily_log WHERE date = ?`, [key],
   );
   if (row) {
-    import('../lib/sync').then((m) => m.syncDailyLog(key, row.qualifying_reads, row.pages_read)).catch(() => {});
+    import('../lib/sync').then((m) =>
+      m.syncDailyLog(key, row.qualifying_reads, row.pages_read, row.reading_seconds ?? 0)
+    ).catch(() => {});
   }
 }
 
@@ -575,6 +637,57 @@ export async function computeStreak(): Promise<number> {
     }
   }
   return streak;
+}
+
+export async function computeBestStreak(): Promise<number> {
+  const db = getDb();
+  const goal = await getDailyGoal();
+
+  const rows = await db.getAllAsync<{ date: string; pages_read: number; qualifying_reads: number }>(
+    `SELECT date, pages_read, qualifying_reads FROM daily_log ORDER BY date ASC`,
+  );
+  const metDates = rows
+    .filter((r) => r.pages_read >= goal || r.qualifying_reads >= goal)
+    .map((r) => r.date);
+  if (metDates.length === 0) return 0;
+
+  let best = 1;
+  let current = 1;
+  for (let i = 1; i < metDates.length; i++) {
+    const prev = new Date(metDates[i - 1]);
+    const cur = new Date(metDates[i]);
+    const dayDiff = Math.round((cur.getTime() - prev.getTime()) / 86400000);
+    current = dayDiff === 1 ? current + 1 : 1;
+    best = Math.max(best, current);
+  }
+  return best;
+}
+
+export async function getArticlesReadCount(): Promise<number> {
+  const db = getDb();
+  const row = await db.getFirstAsync<{ cnt: number }>(
+    `SELECT COUNT(*) as cnt FROM reading_progress WHERE completed = 1`,
+  );
+  return row?.cnt ?? 0;
+}
+
+export async function getTotalReadingSeconds(): Promise<number> {
+  const db = getDb();
+  // Sums the synced daily_log aggregate, not read_events directly — read_events is a
+  // local-only raw log, while reading_seconds on daily_log is what round-trips through
+  // restoreFromSupabase and survives reinstalls.
+  const row = await db.getFirstAsync<{ total: number }>(
+    `SELECT COALESCE(SUM(reading_seconds), 0) as total FROM daily_log`,
+  );
+  return row?.total ?? 0;
+}
+
+export async function getTodayReadingSeconds(): Promise<number> {
+  const db = getDb();
+  const row = await db.getFirstAsync<{ reading_seconds: number }>(
+    `SELECT reading_seconds FROM daily_log WHERE date = ?`, [todayKey()],
+  );
+  return row?.reading_seconds ?? 0;
 }
 
 // --- Remote sources (dynamically followed feeds, e.g. from Feedly search) ---

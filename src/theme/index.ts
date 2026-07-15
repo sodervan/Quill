@@ -15,6 +15,8 @@ export const darkColors = {
   textMuted: '#505869',
   flame: '#F97316',
   flameMuted: 'rgba(249,115,22,0.15)',
+  danger: '#EF4444',
+  dangerMuted: 'rgba(239,68,68,0.15)',
   success: '#34D399',
   white: '#FFFFFF',
   pub: {
@@ -44,6 +46,8 @@ export const lightColors = {
   textMuted: '#9A9590',
   flame: '#D95E10',
   flameMuted: 'rgba(217,94,16,0.12)',
+  danger: '#DC2626',
+  dangerMuted: 'rgba(220,38,38,0.12)',
   success: '#16A34A',
   white: '#FFFFFF',
   pub: {

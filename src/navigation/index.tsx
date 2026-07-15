@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, DeviceEventEmitter, Text, View } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, NavigatorScreenParams } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
@@ -23,20 +23,20 @@ import BookshelfScreen from '../features/books/BookshelfScreen';
 import BookReaderScreen from '../features/books/BookReaderScreen';
 import HistoryScreen from '../features/history/HistoryScreen';
 
-export type RootStackParamList = {
-  Tabs: undefined;
-  Reader: { articleId: string; publicationId: string };
-  Highlights: undefined;
-  History: undefined;
-  BookReader: { bookId: string; initialPage?: number };
-};
-
 export type TabParamList = {
   Feed: undefined;
   Discover: undefined;
   Library: undefined;
   Books: undefined;
   Profile: undefined;
+};
+
+export type RootStackParamList = {
+  Tabs: NavigatorScreenParams<TabParamList> | undefined;
+  Reader: { articleId: string; publicationId: string; highlightId?: number };
+  Highlights: undefined;
+  History: undefined;
+  BookReader: { bookId: string; initialPage?: number };
 };
 
 type IoniconsName = React.ComponentProps<typeof Ionicons>['name'];
@@ -86,6 +86,25 @@ function Tabs() {
 
 type AppStage = 'loading' | 'auth' | 'onboarding' | 'app';
 
+// The local DB doesn't know which account it currently belongs to. If the last account
+// synced locally is different from the one signing in now, the local cache is stale
+// data left over from someone else's (or a previous) account — wipe it before restoring,
+// instead of uploading it into the new account. Same account resuming (including a
+// guest session that later re-signs into the same account) still uploads normally, so
+// any offline changes made in between aren't lost.
+async function syncForUser(uid: string) {
+  const dbMod = await import('../data/db');
+  const syncMod = await import('../lib/sync');
+  const lastUid = await dbMod.getSyncedUid();
+  if (lastUid && lastUid !== uid) {
+    await dbMod.resetLocalUserData();
+  } else {
+    await syncMod.uploadLocalToSupabase();
+  }
+  await syncMod.restoreFromSupabase();
+  await dbMod.setSyncedUid(uid);
+}
+
 export default function Navigation() {
   const [stage, setStage] = useState<AppStage>('loading');
   const colors = useColors();
@@ -105,9 +124,7 @@ export default function Navigation() {
         } else {
           // Already signed in — await restore before showing UI
           try {
-            const m = await import('../lib/sync');
-            await m.uploadLocalToSupabase();
-            await m.restoreFromSupabase();
+            await syncForUser(user.uid);
           } catch {}
           const onboarded = await getSetting('onboarding_done');
           setStage(onboarded === '1' ? 'app' : 'onboarding');
@@ -116,9 +133,7 @@ export default function Navigation() {
         // Subsequent fires = sign-in / sign-out events
         if (user) {
           setStage('loading');
-          import('../lib/sync').then(async (m) => {
-            await m.uploadLocalToSupabase();
-            await m.restoreFromSupabase();
+          syncForUser(user.uid).then(async () => {
             const val = await getSetting('onboarding_done');
             setStage(val === '1' ? 'app' : 'onboarding');
           }).catch(async () => {

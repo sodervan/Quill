@@ -110,13 +110,15 @@ export async function syncGoal(goal: number): Promise<void> {
   } catch {}
 }
 
-export async function syncDailyLog(date: string, qualifyingReads: number, pagesRead = 0): Promise<void> {
+export async function syncDailyLog(
+  date: string, qualifyingReads: number, pagesRead = 0, readingSeconds = 0,
+): Promise<void> {
   const userId = uid();
   if (!userId) return;
   try {
     await setDoc(
       doc(db, 'users', userId, 'daily_log', date),
-      { qualifying_reads: qualifyingReads, pages_read: pagesRead },
+      { qualifying_reads: qualifyingReads, pages_read: pagesRead, reading_seconds: readingSeconds },
       { merge: true },
     );
   } catch {}
@@ -205,6 +207,10 @@ export async function syncDeleteBookHighlight(id: string): Promise<void> {
 }
 
 // kept for API compat — no Supabase read events in Firebase
+// Individual read events stay local-only (there's no natural per-event dedup key across
+// devices, so re-downloading them on every restore would double-count). The seconds they
+// contribute are instead rolled into daily_log.reading_seconds, which IS synced — see
+// incrementDailyLog() in db.ts and the "Time reading" stat on ProfileScreen.
 export async function syncReadEvent(
   _articleId: string, _secondsRead: number, _scrollDepth: number, _qualifying: boolean,
 ): Promise<void> {}
@@ -259,13 +265,16 @@ export async function uploadLocalToSupabase(): Promise<void> {
 
   try {
     const rawDb = dbMod.getDb();
-    const logs = await rawDb.getAllAsync<{ date: string; qualifying_reads: number; pages_read: number }>(
-      `SELECT date, qualifying_reads, pages_read FROM daily_log`,
+    const logs = await rawDb.getAllAsync<{
+      date: string; qualifying_reads: number; pages_read: number; reading_seconds: number;
+    }>(
+      `SELECT date, qualifying_reads, pages_read, reading_seconds FROM daily_log`,
     );
     const b2 = writeBatch(db);
     for (const l of logs) {
       b2.set(doc(db, 'users', userId, 'daily_log', l.date), {
         qualifying_reads: l.qualifying_reads, pages_read: l.pages_read ?? 0,
+        reading_seconds: l.reading_seconds ?? 0,
       });
     }
     await b2.commit();
@@ -413,11 +422,12 @@ export async function restoreFromSupabase(): Promise<void> {
     for (const d of snap.docs) {
       const l = d.data();
       await rawDb.runAsync(
-        `INSERT INTO daily_log (date, qualifying_reads, pages_read) VALUES (?, ?, ?)
+        `INSERT INTO daily_log (date, qualifying_reads, pages_read, reading_seconds) VALUES (?, ?, ?, ?)
          ON CONFLICT(date) DO UPDATE SET
            qualifying_reads = MAX(qualifying_reads, excluded.qualifying_reads),
-           pages_read = MAX(pages_read, excluded.pages_read)`,
-        [d.id, l.qualifying_reads, l.pages_read ?? 0],
+           pages_read = MAX(pages_read, excluded.pages_read),
+           reading_seconds = MAX(reading_seconds, excluded.reading_seconds)`,
+        [d.id, l.qualifying_reads, l.pages_read ?? 0, l.reading_seconds ?? 0],
       );
     }
   } catch {}

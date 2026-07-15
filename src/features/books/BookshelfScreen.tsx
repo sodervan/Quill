@@ -433,8 +433,8 @@ export default function BookshelfScreen() {
             </TouchableOpacity>
             <View style={[s.divider, { backgroundColor: colors.border }]} />
             <TouchableOpacity style={s.action} onPress={handleRemove} activeOpacity={0.75}>
-              <View style={[s.actionIcon, { backgroundColor: colors.flameMuted }]}><Ionicons name="trash-outline" size={18} color={colors.flame} /></View>
-              <Text style={[s.actionLabel, { color: colors.flame }]}>Remove book</Text>
+              <View style={[s.actionIcon, { backgroundColor: colors.dangerMuted }]}><Ionicons name="trash-outline" size={18} color={colors.danger} /></View>
+              <Text style={[s.actionLabel, { color: colors.danger }]}>Remove book</Text>
             </TouchableOpacity>
             <View style={{ height: 24 }} />
           </Animated.View>

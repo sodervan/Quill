@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
-  KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, Alert,
+  KeyboardAvoidingView, Platform, StatusBar, ActivityIndicator, ScrollView,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -12,6 +12,7 @@ import {
 import { auth } from '../../lib/firebase';
 import { useColors } from '../../theme/ThemeContext';
 import { type as T, space, radius } from '../../theme';
+import { AppAlert } from '../../components/AppAlert';
 
 interface Props { onDone: (skipped?: boolean) => void }
 
@@ -20,11 +21,12 @@ export default function AuthScreen({ onDone }: Props) {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
   async function submit() {
     if (!email.trim() || !password.trim()) {
-      Alert.alert('Missing fields', 'Enter email and password.');
+      AppAlert.alert('Missing fields', 'Enter email and password.');
       return;
     }
     setLoading(true);
@@ -41,14 +43,15 @@ export default function AuthScreen({ onDone }: Props) {
         : err?.code === 'auth/email-already-in-use'
           ? 'An account with this email already exists.'
           : err?.message ?? 'Something went wrong. Try again.';
-      Alert.alert('Auth error', msg);
+      AppAlert.alert('Auth error', msg);
     } finally {
       setLoading(false);
     }
   }
 
   const s = StyleSheet.create({
-    root: { flex: 1, backgroundColor: colors.bgDeep, alignItems: 'center', justifyContent: 'center' },
+    root: { flex: 1, backgroundColor: colors.bgDeep },
+    scrollContent: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: space.xl },
     logo: { alignItems: 'center', marginBottom: space.xl },
     logoRing: {
       width: 72, height: 72, borderRadius: 36,
@@ -78,6 +81,7 @@ export default function AuthScreen({ onDone }: Props) {
     },
     inputIcon: { marginRight: space.sm },
     input: { flex: 1, ...T.body, color: colors.text, paddingVertical: 14 },
+    eyeBtn: { padding: 4, marginLeft: 4 },
     primaryBtn: { borderRadius: radius.md, overflow: 'hidden', marginBottom: space.md },
     btnGrad: { paddingVertical: 15, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
     btnText: { ...T.h2, color: colors.bgDeep },
@@ -97,6 +101,11 @@ export default function AuthScreen({ onDone }: Props) {
       <StatusBar barStyle="light-content" backgroundColor={colors.bgDeep} />
       <LinearGradient colors={[colors.bgDeep, colors.bg]} style={StyleSheet.absoluteFill} />
 
+      <ScrollView
+        contentContainerStyle={s.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
       <View style={s.logo}>
         <LinearGradient colors={[colors.accent + '22', 'transparent']} style={s.logoRing}>
           <Text style={s.logoGlyph}>✦</Text>
@@ -141,10 +150,17 @@ export default function AuthScreen({ onDone }: Props) {
               style={s.input}
               placeholder="Password"
               placeholderTextColor={colors.textMuted}
-              secureTextEntry
+              secureTextEntry={!showPassword}
               value={password}
               onChangeText={setPassword}
             />
+            <TouchableOpacity onPress={() => setShowPassword((v) => !v)} style={s.eyeBtn} hitSlop={8}>
+              <Ionicons
+                name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                size={18}
+                color={colors.textMuted}
+              />
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -172,6 +188,7 @@ export default function AuthScreen({ onDone }: Props) {
       <Text style={s.footnote}>
         Your streak, library, and follows sync to your account.
       </Text>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }

@@ -7,6 +7,7 @@ import { initDb } from './src/data/db';
 import Navigation from './src/navigation';
 import { ThemeProvider, useColors } from './src/theme/ThemeContext';
 import { useTheme } from './src/theme/ThemeContext';
+import { AppAlertHost } from './src/components/AppAlert';
 
 function AppInner() {
   const [ready, setReady] = useState(false);
@@ -29,6 +30,7 @@ function AppInner() {
     <SafeAreaProvider>
       <StatusBar style={isDark ? 'light' : 'dark'} />
       <Navigation />
+      <AppAlertHost />
     </SafeAreaProvider>
   );
 }

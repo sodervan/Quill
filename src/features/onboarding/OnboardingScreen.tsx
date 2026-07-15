@@ -8,6 +8,7 @@ import { TOPICS, PUBLICATIONS } from '../../data/publications';
 import { followPublication, setSetting } from '../../data/db';
 import { type as T, space, radius } from '../../theme';
 import { useColors } from '../../theme/ThemeContext';
+import { FaviconAvatar } from '../../components/FaviconAvatar';
 
 const { width } = Dimensions.get('window');
 
@@ -130,7 +131,7 @@ export default function OnboardingScreen({ onDone }: Props) {
                   activeOpacity={0.7}
                 >
                   <View style={[s.pubAvatar, { backgroundColor: c + '22', borderColor: c + '44' }]}>
-                    <Text style={s.pubAvatarEmoji}>{pub.emoji}</Text>
+                    <FaviconAvatar feedUrl={pub.feedUrl} emoji={pub.emoji} size={48} />
                   </View>
                   <View style={s.pubMeta}>
                     <Text style={[s.pubName, sel && { color: c }]}>{pub.name}</Text>
@@ -184,7 +185,7 @@ function createOnboardingStyles(colors: ReturnType<typeof useColors>) { return S
   dotActive: { width: 24, backgroundColor: colors.accent },
   sectionTitle: { ...T.h1, color: colors.text, textAlign: 'center', marginBottom: 6, paddingHorizontal: space.lg },
   sectionSub: { ...T.body, color: colors.textSecondary, textAlign: 'center', marginBottom: 24, paddingHorizontal: space.lg },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: space.md, gap: 10, paddingBottom: 120 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: space.md, gap: 10, paddingBottom: 190 },
   topicChip: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 14, paddingVertical: 10,
@@ -193,7 +194,7 @@ function createOnboardingStyles(colors: ReturnType<typeof useColors>) { return S
   },
   topicEmoji: { fontSize: 18, marginRight: 6 },
   topicLabel: { ...T.h3, color: colors.textSecondary },
-  pubList: { paddingHorizontal: space.md, gap: 10, paddingBottom: 120 },
+  pubList: { paddingHorizontal: space.md, gap: 10, paddingBottom: 190 },
   pubRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: colors.surface, borderRadius: radius.lg,
@@ -204,7 +205,6 @@ function createOnboardingStyles(colors: ReturnType<typeof useColors>) { return S
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, marginRight: 12,
   },
-  pubAvatarEmoji: { fontSize: 22 },
   pubMeta: { flex: 1 },
   pubName: { ...T.h3, color: colors.text, marginBottom: 2 },
   pubDesc: { ...T.caption, color: colors.textMuted },
