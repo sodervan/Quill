@@ -19,6 +19,9 @@ interface Props {
   onAddNote: (page: number) => void;
   highlights: BookHighlightRow[];
   readingTheme?: ReadingTheme;
+  /** Bump this (with a new page number) to jump the already-mounted reader to a page —
+   *  e.g. locating a highlight tapped from the in-reader highlights list. */
+  jumpToPage?: number | null;
 }
 
 const PDF_THEME_OVERLAY: Record<ReadingTheme, string | null> = {
@@ -28,7 +31,7 @@ const PDF_THEME_OVERLAY: Record<ReadingTheme, string | null> = {
 };
 
 export default function PdfReader({
-  fileUri, initialPage, onPageChanged, onAddNote, highlights, readingTheme = 'default',
+  fileUri, initialPage, onPageChanged, onAddNote, highlights, readingTheme = 'default', jumpToPage,
 }: Props) {
   const colors = useColors();
   const [totalPages, setTotalPages] = useState(0);
@@ -36,6 +39,14 @@ export default function PdfReader({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const pageRef = useRef(currentPage);
+  const pdfRef = useRef<any>(null);
+  const lastJumpRef = useRef<number | null | undefined>(jumpToPage);
+
+  useEffect(() => {
+    if (jumpToPage === lastJumpRef.current) return;
+    lastJumpRef.current = jumpToPage;
+    if (jumpToPage != null) pdfRef.current?.setPage?.(jumpToPage);
+  }, [jumpToPage]);
 
   // Note indicator for current page
   const pageHasNote = highlights.some(
@@ -84,6 +95,7 @@ export default function PdfReader({
       )}
 
       <Pdf
+        ref={pdfRef}
         source={{ uri: fileUri, cache: true }}
         page={initialPage || 1}
         onLoadComplete={(pages: number) => {

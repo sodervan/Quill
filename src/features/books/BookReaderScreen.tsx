@@ -19,6 +19,7 @@ import {
   getBookHighlights, deleteBookHighlight, updateBookHighlightNote,
   type BookRow, type BookHighlightRow,
 } from '../../data/books';
+import { logBookReadEvent } from '../../data/db';
 import PdfReader from './components/PdfReader';
 import EpubReader, { type ReadingTheme } from './components/EpubReader';
 
@@ -190,7 +191,7 @@ function TxtReader({
 export default function BookReaderScreen({ route, navigation }: Props) {
   const colors = useColors();
   const { isDark } = useTheme();
-  const { bookId, initialPage } = route.params;
+  const { bookId, initialPage, highlightId } = route.params;
 
   const [book, setBook] = useState<BookRow | null>(null);
   const [highlights, setHighlights] = useState<BookHighlightRow[]>([]);
@@ -199,8 +200,13 @@ export default function BookReaderScreen({ route, navigation }: Props) {
   const [fileExists, setFileExists] = useState(true);
   const [rawMode, setRawMode] = useState(false);
   const [readingTheme, setReadingTheme] = useState<ReadingTheme>('default');
+  // Locate-highlight targets — seeded from route params, updated when the reader's own
+  // highlights list is used to jump to a different highlight mid-session.
+  const [activeHighlightId, setActiveHighlightId] = useState<string | null>(highlightId ?? null);
+  const [jumpToPdfPage, setJumpToPdfPage] = useState<number | null>(null);
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollSaveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const readStartRef = useRef(Date.now());
 
   const THEMES: ReadingTheme[] = ['default', 'sepia', 'night'];
   const THEME_META: Record<ReadingTheme, { icon: string; color: string; label: string }> = {
@@ -278,7 +284,15 @@ export default function BookReaderScreen({ route, navigation }: Props) {
 
       const hl = await getBookHighlights(bookId);
       setHighlights(hl);
+      readStartRef.current = Date.now();
     });
+  }, [bookId]);
+
+  useEffect(() => {
+    return () => {
+      const seconds = Math.floor((Date.now() - readStartRef.current) / 1000);
+      if (seconds > 0) void logBookReadEvent(seconds);
+    };
   }, [bookId]);
 
   function handleProgressChange(page: number, total: number) {
@@ -472,13 +486,16 @@ export default function BookReaderScreen({ route, navigation }: Props) {
           onAddNote={handleAddNote}
           highlights={highlights}
           readingTheme={readingTheme}
+          jumpToPage={jumpToPdfPage}
         />
       )}
       {fileExists && book.format === 'epub' && (
         <EpubReader
+          bookId={bookId}
           fileUri={book.file_uri}
           initialChapter={(initialPage ?? book.current_page) || 0}
           initialScrollOffset={initialPage != null ? 0 : (book.scroll_offset ?? 0)}
+          scrollToHighlightId={activeHighlightId}
           onChapterChanged={(ch, total) => handleProgressChange(ch, total)}
           onScrollChanged={handleScrollChanged}
           onTextSelected={handleTextSelected}
@@ -694,6 +711,20 @@ export default function BookReaderScreen({ route, navigation }: Props) {
                       </Text>
                     ) : null}
                   </View>
+                  {book.format !== 'txt' && (
+                    <TouchableOpacity
+                      style={s.hlLocateBtn}
+                      onPress={() => {
+                        closeList(() => {
+                          if (book.format === 'pdf') setJumpToPdfPage(h.page);
+                          else setActiveHighlightId(h.id);
+                        });
+                      }}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Ionicons name="locate-outline" size={18} color={colors.accent} />
+                    </TouchableOpacity>
+                  )}
                   <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
                 </TouchableOpacity>
               ))}
@@ -799,6 +830,7 @@ function createStyles(colors: ReturnType<typeof useColors>) {
     },
     hlAccent: { width: 4, alignSelf: 'stretch', borderRadius: 2, marginTop: 2 },
     hlBody: { flex: 1 },
+    hlLocateBtn: { padding: 4, marginRight: 2 },
     hlPage: { ...T.caption, fontWeight: '600', marginBottom: 4 },
     hlText: { ...T.body, fontSize: 14, lineHeight: 21, marginBottom: 4 },
     hlNote: { ...T.caption, fontStyle: 'italic' },

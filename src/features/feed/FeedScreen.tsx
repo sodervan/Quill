@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator, Animated, DeviceEventEmitter, Dimensions, FlatList,
   Image, Linking, Modal, NativeScrollEvent, NativeSyntheticEvent, PanResponder,
-  RefreshControl, ScrollView, Share, StyleSheet, Text, TouchableOpacity, View, StatusBar,
+  RefreshControl, ScrollView, Share, StyleSheet, Text, TextInput, TouchableOpacity, View, StatusBar,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
@@ -21,17 +21,23 @@ import { fetchFeed, fetchFeedPage, FeedItem } from '../../data/rss';
 import { scrapeForArticles, deriveBlogUrl } from '../../data/scraper';
 import {
   getFollowedIds, followPublication, unfollowPublication,
+  mutePublication, unmutePublication, getMutedIds,
   upsertArticles, getArticlesForPublications, ArticleRow,
   isArticleSaved, saveArticle, unsaveArticle, getSavedIds,
-  getAllRemoteSources, getRemoteMetaSync, getProgressBatch,
+  getAllRemoteSources, getRemoteMetaSync, getProgressBatch, toggleArticleRead,
 } from '../../data/db';
 
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
 
-const { width: SCREEN_W } = Dimensions.get('window');
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 const HALF_W = SCREEN_W / 2;
 const SWIPE_THRESHOLD = 88;
 const SCROLL_TOP_THRESHOLD = 400;
+const PUB_SEARCH_H = Math.min(560, SCREEN_H * 0.75);
+// Each chip loads a remote favicon — capping how many mount inline keeps the row itself
+// fast even with hundreds of follows; the search sheet (FlatList, virtualized) is the
+// path for finding anything past this cap.
+const CHIP_ROW_CAP = 30;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -399,6 +405,7 @@ interface SheetState {
   article: ArticleRow | null;
   isSaved: boolean;
   isFollowed: boolean;
+  isCompleted: boolean;
   pubName: string;
   pubColor: string;
 }
@@ -423,6 +430,12 @@ function ActionSheet({
       label: sheet.isSaved ? 'Remove from Library' : 'Save to Library',
       color: colors.accent,
       action: 'save',
+    },
+    {
+      icon: sheet.isCompleted ? 'bookmark-outline' : 'checkmark-circle-outline' as any,
+      label: sheet.isCompleted ? 'Mark as unread' : 'Mark as read',
+      color: colors.accent,
+      action: 'toggleRead',
     },
     { icon: 'share-outline' as any, label: 'Share article', color: colors.accent, action: 'share' },
     { icon: 'globe-outline' as any, label: 'Open in browser', color: colors.accent, action: 'browser' },
@@ -502,16 +515,16 @@ export default function FeedScreen() {
   // Progress for all displayed articles — refreshed as one batch query when displayed changes
   const [progressMap, setProgressMap] = useState<Map<string, number>>(new Map());
 
-  // Errors surfaced after a pull-to-refresh
-  const [fetchErrors, setFetchErrors] = useState<{ name: string; reason: string }[]>([]);
-  const [errorSheetMounted, setErrorSheetMounted] = useState(false);
-  const errorSheetAnimY = useRef(new Animated.Value(500)).current;
-  const errorSheetAnimBg = useRef(new Animated.Value(0)).current;
-
   // Hidden articles — ref keeps applyFilter stable (no stale closure on refresh)
   const hiddenRef = useRef<Set<string>>(new Set());
   const [hidden, setHiddenRaw] = useState<Set<string>>(new Set());
   function setHidden(s: Set<string>) { hiddenRef.current = s; setHiddenRaw(s); }
+
+  // Muted publications — unlike hidden articles, this persists (survives refresh/restart)
+  // and follows the same stable-ref pattern so applyFilter doesn't need it in its deps.
+  const mutedRef = useRef<Set<string>>(new Set());
+  const [muted, setMutedRaw] = useState<Set<string>>(new Set());
+  function setMuted(s: Set<string>) { mutedRef.current = s; setMutedRaw(s); }
 
   // Shuffle — ref keeps loadArticles (stable callback) in sync without adding to its deps
   const [shuffled, setShuffled] = useState(false);
@@ -535,7 +548,7 @@ export default function FeedScreen() {
   const sheetAnimBg = useRef(new Animated.Value(0)).current;
   const [sheetMounted, setSheetMounted] = useState(false);
   const [sheetData, setSheetData] = useState<SheetState>({
-    article: null, isSaved: false, isFollowed: false, pubName: '', pubColor: colors.accent,
+    article: null, isSaved: false, isFollowed: false, isCompleted: false, pubName: '', pubColor: colors.accent,
   });
 
   // Publication action sheet (long-press on filter chip)
@@ -543,6 +556,13 @@ export default function FeedScreen() {
   const pubSheetAnimBg = useRef(new Animated.Value(0)).current;
   const [pubSheetMounted, setPubSheetMounted] = useState(false);
   const [pubSheetData, setPubSheetData] = useState<{ id: string; name: string; color: string } | null>(null);
+
+  // Searchable publication filter list — the horizontal chip row doesn't scale once
+  // someone follows a lot of sources, so this is the "find one by typing" alternative.
+  const pubSearchAnimY = useRef(new Animated.Value(PUB_SEARCH_H)).current;
+  const pubSearchAnimBg = useRef(new Animated.Value(0)).current;
+  const [pubSearchMounted, setPubSearchMounted] = useState(false);
+  const [pubSearchQuery, setPubSearchQuery] = useState('');
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
@@ -552,8 +572,8 @@ export default function FeedScreen() {
     const ordered = isShuffle
       ? seededShuffle(base, seed)
       : interleave(base, seed);
-    setDisplayed(ordered.filter((a) => !hiddenRef.current.has(a.id)));
-  // hiddenRef is a mutable ref — intentionally not in deps so applyFilter stays stable
+    setDisplayed(ordered.filter((a) => !hiddenRef.current.has(a.id) && !mutedRef.current.has(a.publication_id)));
+  // hiddenRef/mutedRef are mutable refs — intentionally not in deps so applyFilter stays stable
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -573,7 +593,8 @@ export default function FeedScreen() {
   function acceptNewPosts() {
     const newArticles = pendingNewArticles;
     const toAdd = newArticles.filter(
-      (a) => !hiddenRef.current.has(a.id) && (!activeFilter || activeFilter === a.publication_id),
+      (a) => !hiddenRef.current.has(a.id) && !mutedRef.current.has(a.publication_id) &&
+        (!activeFilter || activeFilter === a.publication_id),
     );
     setAllArticles((prev) => {
       const existing = new Set(prev.map((a) => a.id));
@@ -595,6 +616,7 @@ export default function FeedScreen() {
   const loadArticles = useCallback(async (fromNetwork = false, forceReapply = false) => {
     const ids = await getFollowedIds();
     setFollowedIds(ids);
+    setMuted(new Set(await getMutedIds()));
     if (ids.length === 0) { setAllArticles([]); setDisplayed([]); setLoading(false); setRefreshing(false); return; }
 
     // Always load remote sources to populate filter chips + cache
@@ -605,7 +627,6 @@ export default function FeedScreen() {
     if (fromNetwork) {
       const remoteById = new Map(remoteSrcList.map((r) => [r.id, r]));
       const nextMap = new Map<string, string>();
-      const collectedErrors: { name: string; reason: string }[] = [];
 
       // When a single pub is active, only refresh that one; otherwise refresh all
       const idsToFetch = activeFilter ? [activeFilter] : ids;
@@ -618,11 +639,9 @@ export default function FeedScreen() {
         // Use the stored website_url (from Feedly) as the blog scrape target when available,
         // falling back to deriveBlogUrl for curated pubs or pubs followed before v10.
         const blogUrl = remote?.website_url ?? deriveBlogUrl(feedUrl);
-        let rssOk = false;
         try {
           const { items, nextUrl } = await fetchFeedPage(feedUrl);
           await upsertArticles(items.map((item) => feedItemToRow(item, pubId)));
-          rssOk = true;
           let paginationUrl = nextUrl ?? null;
 
           if (items.length < 25 && !nextUrl && blogUrl) {
@@ -636,26 +655,16 @@ export default function FeedScreen() {
           }
 
           if (paginationUrl) nextMap.set(pubId, paginationUrl);
-        } catch (e: any) {
+        } catch {
+          // RSS fetch failed — fall back to scraping the blog page directly
           if (blogUrl) {
             try {
               const { items: scraped, nextUrl: scrapedNext } = await scrapeForArticles(blogUrl);
               if (scraped.length > 0) {
                 await upsertArticles(scraped.map((item) => feedItemToRow(item, pubId)));
-                rssOk = true;
                 if (scrapedNext) nextMap.set(pubId, scrapedNext);
               }
             } catch {}
-          }
-          if (!rssOk) {
-            const pubName = pub?.name ?? remote?.name ?? pubId;
-            const msg = e?.message ?? '';
-            const reason = msg.includes('abort') || msg.includes('timeout')
-              ? 'Timed out'
-              : /40[34]|429/.test(msg)
-              ? 'Server refused'
-              : 'Network error';
-            collectedErrors.push({ name: pubName, reason });
           }
         }
       }));
@@ -671,8 +680,6 @@ export default function FeedScreen() {
       } else {
         setNextUrlMap(nextMap);
       }
-
-      if (collectedErrors.length > 0) setFetchErrors(collectedErrors);
 
       // Derive lazy-scrape URLs for pubs without RSS pagination
       const fMap = new Map<string, string>();
@@ -701,8 +708,8 @@ export default function FeedScreen() {
       applyFilter(rows, activeFilter, shuffledRef.current);
       hasLoadedRef.current = true;
     } else {
-      // Just remove any newly-hidden articles from the existing ordered list
-      setDisplayed((prev) => prev.filter((a) => !hiddenRef.current.has(a.id)));
+      // Just remove any newly-hidden articles or newly-muted publications from the existing ordered list
+      setDisplayed((prev) => prev.filter((a) => !hiddenRef.current.has(a.id) && !mutedRef.current.has(a.publication_id)));
     }
     setLoading(false);
     setRefreshing(false);
@@ -829,7 +836,7 @@ export default function FeedScreen() {
       setDisplayed((prev) => {
         const existing = new Set(prev.map((a) => a.id));
         const toAdd = freshRows.filter(
-          (a) => !existing.has(a.id) && !hidden.has(a.id) &&
+          (a) => !existing.has(a.id) && !hidden.has(a.id) && !mutedRef.current.has(a.publication_id) &&
             (!activeFilter || activeFilter === pubId),
         );
         return toAdd.length ? [...prev, ...toAdd] : prev;
@@ -857,7 +864,7 @@ export default function FeedScreen() {
         setDisplayed((prev) => {
           const existing = new Set(prev.map((a) => a.id));
           const toAdd = freshRows.filter(
-            (a) => !existing.has(a.id) && !hiddenRef.current.has(a.id) &&
+            (a) => !existing.has(a.id) && !hiddenRef.current.has(a.id) && !mutedRef.current.has(a.publication_id) &&
               (!activeFilter || activeFilter === pubId),
           );
           return toAdd.length ? [...prev, ...toAdd] : prev;
@@ -871,14 +878,15 @@ export default function FeedScreen() {
 
   function handleAutoLoadMore() {
     if (feedTab !== 'following') return;
-    // RSS-paginated pubs
+    // RSS-paginated pubs — skip muted ones entirely, no point paginating content
+    // that's just going to be filtered back out of the displayed feed
     const rssIds = [...nextUrlMap.keys()].filter(
-      (pubId) => !activeFilter || activeFilter === pubId,
+      (pubId) => !mutedRef.current.has(pubId) && (!activeFilter || activeFilter === pubId),
     );
     rssIds.forEach((pubId) => void handleLoadMore(pubId));
     // Unpaginated pubs — try scraping their blog page once per session
     const scrapeIds = [...scrapeUrlMap.keys()].filter(
-      (pubId) => !activeFilter || activeFilter === pubId,
+      (pubId) => !mutedRef.current.has(pubId) && (!activeFilter || activeFilter === pubId),
     );
     scrapeIds.forEach((pubId) => void handleScrapeLoad(pubId));
   }
@@ -916,14 +924,15 @@ export default function FeedScreen() {
 
   function handleAutoLoadMore() {
     if (feedTab !== 'following') return;
-    // RSS-paginated pubs
+    // RSS-paginated pubs — skip muted ones entirely, no point paginating content
+    // that's just going to be filtered back out of the displayed feed
     const rssIds = [...nextUrlMap.keys()].filter(
-      (pubId) => !activeFilter || activeFilter === pubId,
+      (pubId) => !mutedRef.current.has(pubId) && (!activeFilter || activeFilter === pubId),
     );
     rssIds.forEach((pubId) => void handleLoadMore(pubId));
     // Unpaginated pubs — try scraping their blog page once per session
     const scrapeIds = [...scrapeUrlMap.keys()].filter(
-      (pubId) => !activeFilter || activeFilter === pubId,
+      (pubId) => !mutedRef.current.has(pubId) && (!activeFilter || activeFilter === pubId),
     );
     scrapeIds.forEach((pubId) => void handleScrapeLoad(pubId));
   }
@@ -993,6 +1002,7 @@ export default function FeedScreen() {
       article,
       isSaved: saved,
       isFollowed: ids.includes(article.publication_id),
+      isCompleted: (progressMap.get(article.id) ?? 0) >= 1,
       pubName: pub?.name ?? remoteMeta?.name ?? 'Source',
       pubColor: pub?.color ?? remoteMeta?.color ?? colors.accent,
     });
@@ -1032,23 +1042,28 @@ export default function FeedScreen() {
     ]).start(() => setPubSheetMounted(false));
   }
 
-  function closeErrorSheet() {
+  function openPubSearch() {
+    setPubSearchQuery('');
+    pubSearchAnimY.setValue(PUB_SEARCH_H);
+    pubSearchAnimBg.setValue(0);
+    setPubSearchMounted(true);
     Animated.parallel([
-      Animated.timing(errorSheetAnimY, { toValue: 500, duration: 260, useNativeDriver: true }),
-      Animated.timing(errorSheetAnimBg, { toValue: 0, duration: 200, useNativeDriver: true }),
-    ]).start(() => { setErrorSheetMounted(false); setFetchErrors([]); });
+      Animated.spring(pubSearchAnimY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 13 }),
+      Animated.timing(pubSearchAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
   }
 
-  useEffect(() => {
-    if (fetchErrors.length === 0) return;
-    errorSheetAnimY.setValue(500);
-    errorSheetAnimBg.setValue(0);
-    setErrorSheetMounted(true);
+  function closePubSearch() {
     Animated.parallel([
-      Animated.spring(errorSheetAnimY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 13 }),
-      Animated.timing(errorSheetAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
-    ]).start();
-  }, [fetchErrors]);
+      Animated.timing(pubSearchAnimY, { toValue: PUB_SEARCH_H, duration: 260, useNativeDriver: true }),
+      Animated.timing(pubSearchAnimBg, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => setPubSearchMounted(false));
+  }
+
+  function selectFilterFromSearch(id: string | null) {
+    selectFilter(id);
+    closePubSearch();
+  }
 
   async function handleUnfollowPub() {
     if (!pubSheetData) return;
@@ -1056,6 +1071,21 @@ export default function FeedScreen() {
     closePubSheet();
     if (activeFilter === id) setActiveFilter(null);
     await unfollowPublication(id);
+    void loadArticles(false, true);
+  }
+
+  async function handleToggleMutePub() {
+    if (!pubSheetData) return;
+    const { id } = pubSheetData;
+    closePubSheet();
+    if (mutedRef.current.has(id)) {
+      await unmutePublication(id);
+      const next = new Set(mutedRef.current); next.delete(id);
+      setMuted(next);
+    } else {
+      await mutePublication(id);
+      setMuted(new Set(mutedRef.current).add(id));
+    }
     void loadArticles(false, true);
   }
 
@@ -1074,6 +1104,17 @@ export default function FeedScreen() {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         }
         break;
+      case 'toggleRead': {
+        const nextCompleted = !sheetData.isCompleted;
+        await toggleArticleRead(article.id, nextCompleted);
+        setProgressMap((prev) => {
+          const next = new Map(prev);
+          next.set(article.id, nextCompleted ? 1 : 0);
+          return next;
+        });
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        break;
+      }
       case 'share':
         await Share.share({ message: `${article.title}\n${article.link}` });
         break;
@@ -1164,6 +1205,9 @@ export default function FeedScreen() {
     return null;
   }).filter(Boolean) as Array<{ id: string; name: string; emoji: string; color: string; feedUrl: string }>;
   const activeData = feedTab === 'following' ? visibleArticles : exploreArticles;
+  const pubSearchResults = pubSearchQuery.trim()
+    ? followedPubs.filter((p) => p.name.toLowerCase().includes(pubSearchQuery.trim().toLowerCase()))
+    : followedPubs;
 
   return (
     <View style={s.root}>
@@ -1223,11 +1267,18 @@ export default function FeedScreen() {
             style={s.filterScroll}
             contentContainerStyle={s.filterRow}
           >
+            {followedPubs.length > 1 && (
+              <TouchableOpacity style={s.filterChip} onPress={openPubSearch}>
+                <Ionicons name="search-outline" size={14} color={colors.textMuted} />
+                <Text style={s.filterChipText}>Search</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity style={[s.filterChip, !activeFilter && s.filterChipActive]} onPress={() => selectFilter(null)}>
               <Text style={[s.filterChipText, !activeFilter && s.filterChipTextActive]}>All</Text>
             </TouchableOpacity>
-            {followedPubs.map((pub) => {
+            {followedPubs.slice(0, CHIP_ROW_CAP).map((pub) => {
               const active = activeFilter === pub.id;
+              const isMuted = muted.has(pub.id);
               return (
                 <TouchableOpacity
                   key={pub.id}
@@ -1236,8 +1287,13 @@ export default function FeedScreen() {
                   onLongPress={() => openPubSheet({ id: pub.id, name: pub.name, color: pub.color })}
                   delayLongPress={350}
                 >
-                  <FaviconIcon feedUrl={pub.feedUrl} emoji={pub.emoji} size={16} />
-                  <Text style={[s.filterChipText, active && { color: pub.color }]}>{pub.name}</Text>
+                  {isMuted
+                    ? <Ionicons name="volume-mute-outline" size={14} color={colors.textMuted} />
+                    : <FaviconIcon feedUrl={pub.feedUrl} emoji={pub.emoji} size={16} />
+                  }
+                  <Text style={[s.filterChipText, active && { color: pub.color }, isMuted && { color: colors.textMuted }]}>
+                    {pub.name}
+                  </Text>
                 </TouchableOpacity>
               );
             })}
@@ -1374,6 +1430,26 @@ export default function FeedScreen() {
               <Text style={[s.sheetPubName, { color: pubSheetData.color }]}>{pubSheetData.name}</Text>
             </View>
             <View style={s.sheetDivider} />
+            <TouchableOpacity style={s.sheetRow} onPress={() => void handleToggleMutePub()} activeOpacity={0.7}>
+              <View style={[s.sheetRowIcon, { backgroundColor: colors.textMuted + '18' }]}>
+                <Ionicons
+                  name={muted.has(pubSheetData.id) ? 'volume-high-outline' : 'volume-mute-outline'}
+                  size={20}
+                  color={colors.textSecondary}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={s.sheetRowLabel}>
+                  {muted.has(pubSheetData.id) ? `Unmute ${pubSheetData.name}` : `Mute ${pubSheetData.name}`}
+                </Text>
+                <Text style={s.sheetRowDesc}>
+                  {muted.has(pubSheetData.id)
+                    ? 'Articles will show in your feed again.'
+                    : 'Stays followed — just won\'t show articles in your feed.'}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
             <TouchableOpacity style={s.sheetRow} onPress={() => void handleUnfollowPub()} activeOpacity={0.7}>
               <View style={[s.sheetRowIcon, { backgroundColor: colors.danger + '18' }]}>
                 <Ionicons name="person-remove-outline" size={20} color={colors.danger} />
@@ -1386,32 +1462,88 @@ export default function FeedScreen() {
         </Modal>
       )}
 
-      {/* ── Fetch error sheet ── */}
-      {errorSheetMounted && (
-        <Modal transparent animationType="none" visible={errorSheetMounted} onRequestClose={closeErrorSheet} statusBarTranslucent>
-          <Animated.View style={[StyleSheet.absoluteFill, { opacity: errorSheetAnimBg }]}>
-            <TouchableOpacity style={[StyleSheet.absoluteFill, s.sheetBackdrop]} onPress={closeErrorSheet} activeOpacity={1} />
+      {/* ── Searchable publication filter list ── */}
+      {pubSearchMounted && (
+        <Modal transparent animationType="none" visible={pubSearchMounted} onRequestClose={closePubSearch} statusBarTranslucent>
+          <Animated.View style={[StyleSheet.absoluteFill, { opacity: pubSearchAnimBg }]}>
+            <TouchableOpacity style={[StyleSheet.absoluteFill, s.sheetBackdrop]} onPress={closePubSearch} activeOpacity={1} />
           </Animated.View>
-          <Animated.View style={[s.errorSheet, { transform: [{ translateY: errorSheetAnimY }] }]}>
+          <Animated.View style={[s.sheet, { height: PUB_SEARCH_H, transform: [{ translateY: pubSearchAnimY }] }]}>
             <View style={s.sheetHandle} />
-            <View style={s.errorSheetHeader}>
-              <View style={[s.errorSheetIconWrap, { backgroundColor: colors.flame + '20' }]}>
-                <Ionicons name="wifi-outline" size={20} color={colors.flame} />
-              </View>
-              <Text style={s.errorSheetTitle}>Some sources didn't load</Text>
+            <View style={s.pubSearchHeader}>
+              <Text style={s.sheetTitle}>Filter by source</Text>
+              <TouchableOpacity onPress={closePubSearch} hitSlop={10}>
+                <Ionicons name="close" size={22} color={colors.textMuted} />
+              </TouchableOpacity>
             </View>
-            {fetchErrors.map((e, i) => (
-              <View key={i} style={s.errorSheetRow}>
-                <Text style={s.errorSheetName} numberOfLines={1}>{e.name}</Text>
-                <Text style={s.errorSheetReason}>{e.reason}</Text>
-              </View>
-            ))}
-            <TouchableOpacity style={s.errorSheetBtn} onPress={closeErrorSheet} activeOpacity={0.8}>
-              <Text style={s.errorSheetBtnText}>Got it</Text>
-            </TouchableOpacity>
+            <View style={s.pubSearchInputWrap}>
+              <Ionicons name="search-outline" size={16} color={colors.textMuted} />
+              <TextInput
+                value={pubSearchQuery}
+                onChangeText={setPubSearchQuery}
+                placeholder="Search followed sources"
+                placeholderTextColor={colors.textMuted}
+                style={s.pubSearchInput}
+                autoCorrect={false}
+                autoFocus
+              />
+              {pubSearchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => setPubSearchQuery('')} hitSlop={8}>
+                  <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+                </TouchableOpacity>
+              )}
+            </View>
+            <FlatList
+              data={pubSearchResults}
+              keyExtractor={(pub) => pub.id}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              initialNumToRender={20}
+              windowSize={5}
+              ListHeaderComponent={
+                <TouchableOpacity
+                  style={s.pubSearchRow}
+                  onPress={() => selectFilterFromSearch(null)}
+                  activeOpacity={0.7}
+                >
+                  <View style={[s.pubSearchIconWrap, { backgroundColor: colors.accentMuted }]}>
+                    <Ionicons name="albums-outline" size={16} color={colors.accent} />
+                  </View>
+                  <Text style={s.pubSearchName}>All sources</Text>
+                  {!activeFilter && <Ionicons name="checkmark" size={18} color={colors.accent} />}
+                </TouchableOpacity>
+              }
+              ListEmptyComponent={
+                <Text style={s.pubSearchEmpty}>No sources match "{pubSearchQuery}"</Text>
+              }
+              ListFooterComponent={<View style={{ height: 24 }} />}
+              renderItem={({ item: pub }) => {
+                const active = activeFilter === pub.id;
+                const isMuted = muted.has(pub.id);
+                return (
+                  <TouchableOpacity
+                    style={s.pubSearchRow}
+                    onPress={() => selectFilterFromSearch(active ? null : pub.id)}
+                    onLongPress={() => { closePubSearch(); openPubSheet({ id: pub.id, name: pub.name, color: pub.color }); }}
+                    delayLongPress={350}
+                    activeOpacity={0.7}
+                  >
+                    {isMuted
+                      ? <Ionicons name="volume-mute-outline" size={18} color={colors.textMuted} style={{ width: 30 }} />
+                      : <FaviconIcon feedUrl={pub.feedUrl} emoji={pub.emoji} size={20} />
+                    }
+                    <Text style={[s.pubSearchName, isMuted && { color: colors.textMuted }]} numberOfLines={1}>
+                      {pub.name}
+                    </Text>
+                    {active && <Ionicons name="checkmark" size={18} color={pub.color} />}
+                  </TouchableOpacity>
+                );
+              }}
+            />
           </Animated.View>
         </Modal>
       )}
+
     </View>
   );
 }
@@ -1577,7 +1709,24 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
     borderBottomWidth: 1, borderBottomColor: colors.border + '60',
   },
   sheetRowIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
-  sheetRowLabel: { ...T.body, color: colors.text, flex: 1 },
+  sheetRowLabel: { ...T.body, color: colors.text, flex: 1, marginBottom: 2 },
+  sheetRowDesc: { ...T.caption, color: colors.textMuted },
+  pubSearchHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  pubSearchInputWrap: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: colors.surfaceHigher, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: 12, height: 42, marginBottom: 10,
+  },
+  pubSearchInput: { flex: 1, ...T.body, color: colors.text, padding: 0 },
+  pubSearchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.border + '60',
+  },
+  pubSearchIconWrap: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  pubSearchName: { ...T.body, color: colors.text, flex: 1 },
+  pubSearchEmpty: { ...T.caption, color: colors.textMuted, textAlign: 'center', paddingVertical: 24 },
 
   emptyTitle: { ...T.h2, color: colors.text },
   emptySub: { ...T.body, color: colors.textMuted, textAlign: 'center' },
@@ -1626,29 +1775,4 @@ function createFeedStyles(colors: ReturnType<typeof useColors>) { return StyleSh
   continueCardTitle: { fontSize: 12, fontWeight: '600' as const, color: colors.text, lineHeight: 17 },
   continueProgressTrack: { height: 3, backgroundColor: colors.surfaceHigher },
   continueProgressFill: { height: 3 },
-
-  // Error bottom sheet — same structural style as sheet, so Animated.View translateY works
-  errorSheet: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
-    backgroundColor: colors.surface,
-    borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    borderTopWidth: 1, borderColor: colors.border,
-    paddingHorizontal: space.lg, paddingTop: 12, paddingBottom: 32,
-    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 20, shadowOffset: { width: 0, height: -4 },
-    elevation: 20,
-  },
-  errorSheetHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
-  errorSheetIconWrap: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
-  errorSheetTitle: { ...T.h2, color: colors.text, flex: 1 },
-  errorSheetRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border,
-  },
-  errorSheetName: { ...T.body, color: colors.text, flex: 1, marginRight: 12 },
-  errorSheetReason: { ...T.caption, color: colors.textMuted },
-  errorSheetBtn: {
-    marginTop: 20, paddingVertical: 14, borderRadius: radius.md,
-    backgroundColor: colors.accent, alignItems: 'center',
-  },
-  errorSheetBtnText: { ...T.body, color: colors.bg, fontWeight: '700' },
 }); }

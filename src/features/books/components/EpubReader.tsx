@@ -17,8 +17,12 @@ export type ReadingTheme = 'default' | 'sepia' | 'night';
 
 interface Props {
   fileUri: string;
+  bookId: string;
   initialChapter: number;
   initialScrollOffset?: number;
+  /** When set, scrolls to this highlight's mark once its chapter loads, taking priority
+   *  over initialScrollOffset. Falls back to the normal offset if the mark isn't found. */
+  scrollToHighlightId?: string | null;
   onChapterChanged: (chapter: number, total: number) => void;
   onScrollChanged?: (depth: number) => void;
   onTextSelected: (text: string, chapter: number) => void;
@@ -77,7 +81,43 @@ function inlineImages(html: string, files: Record<string, Uint8Array>, chapterDi
   });
 }
 
-async function parseEpub(fileUri: string): Promise<Chapter[]> {
+// Parsing a multi-MB EPUB means unzipping the whole archive and re-inlining every
+// embedded image as base64 for every chapter — expensive, and was being redone from
+// scratch on every single open. Cache the parsed output to disk, keyed by book id and
+// invalidated by the source file's mtime/size, so repeat opens just read a JSON blob.
+const CACHE_DIR = `${FileSystem.documentDirectory}books/parsed/`;
+
+function cachePathFor(bookId: string): string {
+  return `${CACHE_DIR}${bookId}.json`;
+}
+
+async function readCachedChapters(bookId: string, mtime: number, size: number): Promise<Chapter[] | null> {
+  try {
+    const path = cachePathFor(bookId);
+    const info = await FileSystem.getInfoAsync(path);
+    if (!info.exists) return null;
+    const raw = await FileSystem.readAsStringAsync(path);
+    const cached = JSON.parse(raw) as { mtime: number; size: number; chapters: Chapter[] };
+    if (cached.mtime !== mtime || cached.size !== size) return null;
+    return cached.chapters;
+  } catch { return null; }
+}
+
+async function writeCachedChapters(bookId: string, mtime: number, size: number, chapters: Chapter[]): Promise<void> {
+  try {
+    await FileSystem.makeDirectoryAsync(CACHE_DIR, { intermediates: true });
+    await FileSystem.writeAsStringAsync(cachePathFor(bookId), JSON.stringify({ mtime, size, chapters }));
+  } catch {}
+}
+
+async function parseEpub(fileUri: string, bookId: string): Promise<Chapter[]> {
+  const fileInfo = await FileSystem.getInfoAsync(fileUri, { size: true } as any);
+  const mtime = (fileInfo as any).modificationTime ?? 0;
+  const size = (fileInfo as any).size ?? 0;
+
+  const cached = await readCachedChapters(bookId, mtime, size);
+  if (cached) return cached;
+
   const b64 = await FileSystem.readAsStringAsync(fileUri, {
     encoding: FileSystem.EncodingType.Base64,
   });
@@ -121,7 +161,9 @@ async function parseEpub(fileUri: string): Promise<Chapter[]> {
     chapters.push({ id: String(chapters.length), title, html: rawWithImages });
   }
 
-  return chapters.length > 0 ? chapters : [{ id: '0', title: 'Content', html: decodeFile(Object.values(files)[0]) }];
+  const result = chapters.length > 0 ? chapters : [{ id: '0', title: 'Content', html: decodeFile(Object.values(files)[0]) }];
+  void writeCachedChapters(bookId, mtime, size, result);
+  return result;
 }
 
 // ─── JS injection ──────────────────────────────────────────────────────────────
@@ -194,22 +236,66 @@ function buildApplyHighlightsJS(items: Array<{ id: string; text: string; color: 
   const data = JSON.stringify(items);
   return `
 (function(){
-  function applyHL(id,txt,color){
+  // A highlight spanning a paragraph/list-item break can't be found as one literal
+  // string in a single text node (that's how Selection.toString() joined it, but the
+  // DOM still has the real <p>/<li> boundary in between). Build a flat text index of
+  // the whole body mapping each character back to its (node, offset), search each
+  // newline-delimited chunk in that flat text, then reconstruct a real Range from the
+  // match and wrap it per intersecting text node — same approach used for articles.
+  function buildTextIndex(){
     var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-    var node;
+    var node,text='',map=[];
     while((node=walker.nextNode())){
+      if(node.parentNode&&node.parentNode.hasAttribute&&node.parentNode.hasAttribute('data-hl-id'))continue;
       var v=node.nodeValue||'';
-      var idx=v.indexOf(txt);
-      if(idx<0)continue;
+      for(var i=0;i<v.length;i++)map.push({node:node,offset:i});
+      text+=v;
+    }
+    return {text:text,map:map};
+  }
+  function findChunkRange(index,chunk){
+    var idx=index.text.indexOf(chunk);
+    if(idx<0)return null;
+    var startInfo=index.map[idx],endInfo=index.map[idx+chunk.length-1];
+    if(!startInfo||!endInfo)return null;
+    var r=document.createRange();
+    r.setStart(startInfo.node,startInfo.offset);
+    r.setEnd(endInfo.node,endInfo.offset+1);
+    return r;
+  }
+  function wrapRange(range,id,color){
+    var root=range.commonAncestorContainer;
+    var entries=[];
+    if(root.nodeType===3){
+      entries.push({node:root,start:range.startOffset,end:range.endOffset});
+    }else{
+      var tw=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
+      var n;
+      while((n=tw.nextNode())){
+        if(!n.nodeValue||!range.intersectsNode(n))continue;
+        if(n.parentNode&&n.parentNode.hasAttribute&&n.parentNode.hasAttribute('data-hl-id'))continue;
+        var st=(n===range.startContainer)?range.startOffset:0;
+        var en=(n===range.endContainer)?range.endOffset:n.nodeValue.length;
+        if(en>st)entries.push({node:n,start:st,end:en});
+      }
+    }
+    entries.forEach(function(e){
+      var sub=document.createRange();
+      sub.setStart(e.node,e.start);
+      sub.setEnd(e.node,e.end);
       var span=document.createElement('span');
       span.setAttribute('data-hl-id',id);
       span.style.cssText='background:'+color+'55;border-radius:2px;padding:0 1px;';
-      var r=document.createRange();
-      r.setStart(node,idx);
-      r.setEnd(node,idx+txt.length);
-      try{r.surroundContents(span);}catch(e){}
-      break;
-    }
+      try{sub.surroundContents(span);}catch(err){}
+    });
+  }
+  function applyHL(id,txt,color){
+    var chunks=txt.split(/\\r?\\n+/).map(function(c){return c.trim();}).filter(Boolean);
+    chunks.forEach(function(chunk){
+      var index=buildTextIndex();
+      var range=findChunkRange(index,chunk);
+      if(range)wrapRange(range,id,color);
+    });
   }
   var hs=${data};
   hs.forEach(function(h){try{applyHL(h.id,h.text,h.color);}catch(e){}});
@@ -304,7 +390,7 @@ function buildChapterHtml(
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function EpubReader({
-  fileUri, initialChapter, initialScrollOffset = 0,
+  fileUri, bookId, initialChapter, initialScrollOffset = 0, scrollToHighlightId,
   onChapterChanged, onScrollChanged, onTextSelected,
   onAddNote, highlights, rawMode = false, readingTheme = 'default',
 }: Props) {
@@ -320,8 +406,24 @@ export default function EpubReader({
   const webViewRef = useRef<WebView>(null);
   const appliedHLRef = useRef<Set<string>>(new Set());
   const prevCurrentRef = useRef(current);
-  // Only restore scroll offset on the very first load of initialChapter
+  // Only restore the persisted offset on the very first load of initialChapter
   const scrollRestoredRef = useRef(false);
+  // Tracks which chapter's HTML the WebView last actually loaded — lets handleLoadEnd
+  // tell a genuine chapter change (start at top) apart from a same-chapter reload
+  // (theme/rawMode toggle — the WebView's `source` changed, forcing a full reload,
+  // but the reader hasn't actually moved, so it should stay exactly where it was).
+  const loadedChapterRef = useRef<number | null>(null);
+  // Continuously-updated scroll depth for the CURRENT chapter, used to restore
+  // position across a same-chapter reload (theme/rawMode) — unlike the one-shot
+  // initialScrollOffset prop, this always reflects where the reader actually is now.
+  const liveScrollDepthRef = useRef(initialScrollOffset);
+  // Only try to locate a given highlight once per navigation to it
+  const highlightScrollDoneRef = useRef(false);
+  // Which chapter handleLoadEnd should scroll-to-highlight on arrival at — seeded from
+  // the mount-time target, updated whenever scrollToHighlightId changes at runtime
+  // (e.g. the reader's own highlights list is used to jump to a different highlight).
+  const pendingHLPageRef = useRef<number | null>(scrollToHighlightId != null ? (initialChapter || 0) : null);
+  const mountHLIdRef = useRef(scrollToHighlightId);
 
   function injectHighlights(items: BookHighlightRow[]) {
     if (!webViewRef.current || items.length === 0) return;
@@ -330,29 +432,70 @@ export default function EpubReader({
     );
   }
 
+  function restoreScroll(offset: number) {
+    webViewRef.current?.injectJavaScript(`
+      (function(){
+        var tries = 0;
+        function restore() {
+          var max = document.documentElement.scrollHeight - window.innerHeight;
+          if (max > 10) {
+            window.scrollTo(0, ${offset} * max);
+          } else if (tries++ < 8) {
+            setTimeout(restore, 80);
+          }
+        }
+        setTimeout(restore, 120);
+      })();true;
+    `);
+  }
+
+  function scrollToHighlightMark(id: string, fallbackOffset: number) {
+    webViewRef.current?.injectJavaScript(`
+      (function(){
+        var tries = 0;
+        function go() {
+          var el = document.querySelector('[data-hl-id="${id}"]');
+          if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
+          if (tries++ < 20) { setTimeout(go, 120); return; }
+          if (${fallbackOffset} > 0.01) {
+            var max = document.documentElement.scrollHeight - window.innerHeight;
+            if (max > 10) window.scrollTo(0, ${fallbackOffset} * max);
+          }
+        }
+        setTimeout(go, 250);
+      })();true;
+    `);
+  }
+
   function handleLoadEnd() {
+    const isChapterChange = loadedChapterRef.current !== current;
+    loadedChapterRef.current = current;
+
     appliedHLRef.current = new Set();
     const forChapter = highlights.filter((h) => h.page === current && h.selected_text);
     forChapter.forEach((h) => appliedHLRef.current.add(h.id));
     injectHighlights(forChapter);
 
-    // Restore scroll position on first load of the initial chapter only
-    if (!scrollRestoredRef.current && current === initialChapter && initialScrollOffset > 0.01) {
-      scrollRestoredRef.current = true;
-      webViewRef.current?.injectJavaScript(`
-        (function(){
-          var tries = 0;
-          function restore() {
-            var max = document.documentElement.scrollHeight - window.innerHeight;
-            if (max > 10) {
-              window.scrollTo(0, ${initialScrollOffset} * max);
-            } else if (tries++ < 8) {
-              setTimeout(restore, 80);
-            }
-          }
-          setTimeout(restore, 120);
-        })();true;
-      `);
+    // Arriving at a specific highlight (from the Highlights page or the in-reader
+    // highlights list) takes priority over any scroll-position restore.
+    if (scrollToHighlightId && !highlightScrollDoneRef.current && current === pendingHLPageRef.current) {
+      highlightScrollDoneRef.current = true;
+      scrollToHighlightMark(scrollToHighlightId, initialScrollOffset);
+      return;
+    }
+
+    if (isChapterChange) {
+      // Genuine chapter navigation (or first load) — restore the persisted position
+      // only if this is the chapter we originally opened to; otherwise start at top.
+      if (!scrollRestoredRef.current && current === initialChapter && initialScrollOffset > 0.01) {
+        scrollRestoredRef.current = true;
+        restoreScroll(initialScrollOffset);
+      }
+      liveScrollDepthRef.current = current === initialChapter ? initialScrollOffset : 0;
+    } else if (liveScrollDepthRef.current > 0.01) {
+      // Same chapter reloaded (theme/rawMode toggle changed the WebView's source) —
+      // put the reader back exactly where they were, not at the top.
+      restoreScroll(liveScrollDepthRef.current);
     }
   }
 
@@ -392,6 +535,25 @@ export default function EpubReader({
     };
   });
 
+  // Locate a highlight requested at runtime (e.g. tapped from the reader's own
+  // highlights list while already reading) — distinct from the mount-time arrival,
+  // which handleLoadEnd already handles via pendingHLPageRef's initial value.
+  useEffect(() => {
+    if (scrollToHighlightId === mountHLIdRef.current) return;
+    mountHLIdRef.current = scrollToHighlightId;
+    if (!scrollToHighlightId || chaptersLenRef.current === 0) return;
+    const target = highlights.find((h) => h.id === scrollToHighlightId);
+    if (!target) return;
+    highlightScrollDoneRef.current = false;
+    pendingHLPageRef.current = target.page;
+    if (target.page === currentRef.current) {
+      highlightScrollDoneRef.current = true;
+      scrollToHighlightMark(scrollToHighlightId, 0);
+    } else {
+      goToFn.current(target.page);
+    }
+  }, [scrollToHighlightId, highlights]);
+
   // Disabled while the WebView has an active text selection (sel_active message from SELECTION_JS).
   const isSelectingRef = useRef(false);
 
@@ -410,7 +572,7 @@ export default function EpubReader({
   ).current;
 
   useEffect(() => {
-    parseEpub(fileUri)
+    parseEpub(fileUri, bookId)
       .then((chs) => {
         setChapters(chs);
         chaptersLenRef.current = chs.length;
@@ -431,6 +593,7 @@ export default function EpubReader({
       } else if (msg.type === 'sel_active') {
         isSelectingRef.current = msg.v as boolean;
       } else if (msg.type === 'scroll_depth') {
+        liveScrollDepthRef.current = msg.depth as number;
         onScrollChanged?.(msg.depth as number);
       }
     } catch {}

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   StatusBar, Animated, TextInput, ScrollView,
-  Modal, Pressable, PanResponder, Share, KeyboardAvoidingView, Platform,
+  Modal, Pressable, PanResponder, Share, KeyboardAvoidingView, Platform, Dimensions,
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -32,6 +32,8 @@ type ArticleHL = {
 type Nav = NativeStackNavigationProp<RootStackParamList, 'Tabs'>;
 
 const SWIPE_THRESHOLD = 88;
+const PUB_SEARCH_H = Math.min(560, Dimensions.get('window').height * 0.75);
+const CHIP_ROW_CAP = 30;
 
 // Swipe left or right to delete — gray reveal bg, matching the Feed screen's swipe pattern.
 // A completed swipe never deletes outright: it springs back and asks for confirmation
@@ -165,6 +167,31 @@ export default function HighlightsScreen() {
   // Filter state
   const [activePubId, setActivePubId] = useState<string | null>(null);
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
+
+  // Searchable filter list — same "find one by typing" fallback as the Feed page,
+  // context-aware: sources on the Articles tab, books on the Books tab.
+  const pubSearchAnimY = useRef(new Animated.Value(PUB_SEARCH_H)).current;
+  const pubSearchAnimBg = useRef(new Animated.Value(0)).current;
+  const [pubSearchMounted, setPubSearchMounted] = useState(false);
+  const [pubSearchQuery, setPubSearchQuery] = useState('');
+
+  function openPubSearch() {
+    setPubSearchQuery('');
+    pubSearchAnimY.setValue(PUB_SEARCH_H);
+    pubSearchAnimBg.setValue(0);
+    setPubSearchMounted(true);
+    Animated.parallel([
+      Animated.spring(pubSearchAnimY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 13 }),
+      Animated.timing(pubSearchAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }
+
+  function closePubSearch() {
+    Animated.parallel([
+      Animated.timing(pubSearchAnimY, { toValue: PUB_SEARCH_H, duration: 260, useNativeDriver: true }),
+      Animated.timing(pubSearchAnimBg, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => setPubSearchMounted(false));
+  }
 
   useFocusEffect(useCallback(() => {
     setLoading(true);
@@ -311,7 +338,7 @@ export default function HighlightsScreen() {
       );
       return;
     }
-    nav.navigate('BookReader', { bookId: item.book_id, initialPage: item.page });
+    nav.navigate('BookReader', { bookId: item.book_id, initialPage: item.page, highlightId: item.id });
   }
 
   // Unique publications from article highlights (for filter chips)
@@ -343,6 +370,13 @@ export default function HighlightsScreen() {
     }
     return Array.from(seen.values());
   }, [bookItems]);
+
+  const pubSearchResults = pubSearchQuery.trim()
+    ? uniqueArticlePubs.filter((p) => p.name.toLowerCase().includes(pubSearchQuery.trim().toLowerCase()))
+    : uniqueArticlePubs;
+  const bookSearchResults = pubSearchQuery.trim()
+    ? uniqueBooks.filter((b) => b.title.toLowerCase().includes(pubSearchQuery.trim().toLowerCase()))
+    : uniqueBooks;
 
   // Filtered + searched article highlights
   const filteredArticles = useMemo(() => {
@@ -485,13 +519,17 @@ export default function HighlightsScreen() {
             contentContainerStyle={s.filterRow}
             style={s.filterScroll}
           >
+            <TouchableOpacity style={s.filterChip} onPress={openPubSearch}>
+              <Ionicons name="search-outline" size={14} color={colors.textMuted} />
+              <Text style={s.filterChipText}>Search</Text>
+            </TouchableOpacity>
             <TouchableOpacity
               style={[s.filterChip, activePubId === null && s.filterChipAllActive]}
               onPress={() => setActivePubId(null)}
             >
               <Text style={[s.filterChipText, activePubId === null && { color: colors.accent }]}>All</Text>
             </TouchableOpacity>
-            {uniqueArticlePubs.map((pub) => {
+            {uniqueArticlePubs.slice(0, CHIP_ROW_CAP).map((pub) => {
               const isActive = activePubId === pub.id;
               return (
                 <TouchableOpacity
@@ -518,13 +556,17 @@ export default function HighlightsScreen() {
             contentContainerStyle={s.filterRow}
             style={s.filterScroll}
           >
+            <TouchableOpacity style={s.filterChip} onPress={openPubSearch}>
+              <Ionicons name="search-outline" size={14} color={colors.textMuted} />
+              <Text style={s.filterChipText}>Search</Text>
+            </TouchableOpacity>
             <TouchableOpacity
               style={[s.filterChip, activeBookId === null && s.filterChipAllActive]}
               onPress={() => setActiveBookId(null)}
             >
               <Text style={[s.filterChipText, activeBookId === null && { color: colors.accent }]}>All</Text>
             </TouchableOpacity>
-            {uniqueBooks.map((book) => {
+            {uniqueBooks.slice(0, CHIP_ROW_CAP).map((book) => {
               const isActive = activeBookId === book.id;
               return (
                 <TouchableOpacity
@@ -584,9 +626,6 @@ export default function HighlightsScreen() {
                       ) : null}
                       <View style={s.cardBottom}>
                         <Text style={s.date}>{format(new Date(item.created_at), 'MMM d, yyyy')}</Text>
-                        <TouchableOpacity onPress={() => openHighlightMenu({ type: 'article', item })} hitSlop={8}>
-                          <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
-                        </TouchableOpacity>
                       </View>
                     </View>
                   </TouchableOpacity>
@@ -647,9 +686,6 @@ export default function HighlightsScreen() {
                       </View>
                       <View style={s.cardBottom}>
                         <Text style={s.date}>{format(new Date(item.created_at), 'MMM d, yyyy')}</Text>
-                        <TouchableOpacity onPress={() => openHighlightMenu({ type: 'book', item })} hitSlop={8}>
-                          <Ionicons name="trash-outline" size={16} color={colors.textMuted} />
-                        </TouchableOpacity>
                       </View>
                     </View>
                     {/* Tap hint when book file is missing */}
@@ -797,6 +833,129 @@ export default function HighlightsScreen() {
         })()}
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* ── Searchable filter list (sources on Articles tab, books on Books tab) ── */}
+      {pubSearchMounted && (
+        <Modal transparent animationType="none" visible={pubSearchMounted} onRequestClose={closePubSearch} statusBarTranslucent>
+          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)', opacity: pubSearchAnimBg }]}>
+            <TouchableOpacity style={StyleSheet.absoluteFill} onPress={closePubSearch} activeOpacity={1} />
+          </Animated.View>
+          <Animated.View
+            style={[
+              s.modalSheet,
+              { height: PUB_SEARCH_H, transform: [{ translateY: pubSearchAnimY }], position: 'absolute', bottom: 0, left: 0, right: 0 },
+            ]}
+          >
+            <View style={s.modalHandle} />
+            <View style={s.pubSearchHeader}>
+              <Text style={s.modalTitle}>{tab === 'articles' ? 'Filter by source' : 'Filter by book'}</Text>
+              <TouchableOpacity onPress={closePubSearch} hitSlop={10}>
+                <Ionicons name="close" size={22} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <View style={s.pubSearchInputWrap}>
+              <Ionicons name="search-outline" size={16} color={colors.textMuted} />
+              <TextInput
+                value={pubSearchQuery}
+                onChangeText={setPubSearchQuery}
+                placeholder={tab === 'articles' ? 'Search sources' : 'Search books'}
+                placeholderTextColor={colors.textMuted}
+                style={s.pubSearchInput}
+                autoCorrect={false}
+                autoFocus
+              />
+              {pubSearchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => setPubSearchQuery('')} hitSlop={8}>
+                  <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+                </TouchableOpacity>
+              )}
+            </View>
+            {tab === 'articles' ? (
+              <FlatList
+                data={pubSearchResults}
+                keyExtractor={(pub) => pub.id}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                initialNumToRender={20}
+                windowSize={5}
+                ListHeaderComponent={
+                  <TouchableOpacity
+                    style={s.pubSearchRow}
+                    onPress={() => { setActivePubId(null); closePubSearch(); }}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[s.pubSearchIconWrap, { backgroundColor: colors.accentMuted }]}>
+                      <Ionicons name="albums-outline" size={16} color={colors.accent} />
+                    </View>
+                    <Text style={s.pubSearchName}>All sources</Text>
+                    {activePubId === null && <Ionicons name="checkmark" size={18} color={colors.accent} />}
+                  </TouchableOpacity>
+                }
+                ListEmptyComponent={
+                  <Text style={s.pubSearchEmpty}>No sources match "{pubSearchQuery}"</Text>
+                }
+                ListFooterComponent={<View style={{ height: 24 }} />}
+                renderItem={({ item: pub }) => {
+                  const active = activePubId === pub.id;
+                  return (
+                    <TouchableOpacity
+                      style={s.pubSearchRow}
+                      onPress={() => { setActivePubId(active ? null : pub.id); closePubSearch(); }}
+                      activeOpacity={0.7}
+                    >
+                      <FaviconAvatar feedUrl={pub.iconUrl} emoji={pub.emoji} size={20} />
+                      <Text style={s.pubSearchName} numberOfLines={1}>{pub.name}</Text>
+                      {active && <Ionicons name="checkmark" size={18} color={pub.color} />}
+                    </TouchableOpacity>
+                  );
+                }}
+              />
+            ) : (
+              <FlatList
+                data={bookSearchResults}
+                keyExtractor={(book) => book.id}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                initialNumToRender={20}
+                windowSize={5}
+                ListHeaderComponent={
+                  <TouchableOpacity
+                    style={s.pubSearchRow}
+                    onPress={() => { setActiveBookId(null); closePubSearch(); }}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[s.pubSearchIconWrap, { backgroundColor: colors.accentMuted }]}>
+                      <Ionicons name="albums-outline" size={16} color={colors.accent} />
+                    </View>
+                    <Text style={s.pubSearchName}>All books</Text>
+                    {activeBookId === null && <Ionicons name="checkmark" size={18} color={colors.accent} />}
+                  </TouchableOpacity>
+                }
+                ListEmptyComponent={
+                  <Text style={s.pubSearchEmpty}>No books match "{pubSearchQuery}"</Text>
+                }
+                ListFooterComponent={<View style={{ height: 24 }} />}
+                renderItem={({ item: book }) => {
+                  const active = activeBookId === book.id;
+                  return (
+                    <TouchableOpacity
+                      style={s.pubSearchRow}
+                      onPress={() => { setActiveBookId(active ? null : book.id); closePubSearch(); }}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[s.pubSearchIconWrap, { backgroundColor: colors.accentMuted }]}>
+                        <Ionicons name="book-outline" size={16} color={colors.accent} />
+                      </View>
+                      <Text style={s.pubSearchName} numberOfLines={1}>{book.title}</Text>
+                      {active && <Ionicons name="checkmark" size={18} color={colors.accent} />}
+                    </TouchableOpacity>
+                  );
+                }}
+              />
+            )}
+          </Animated.View>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -935,6 +1094,22 @@ function createStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.
     backgroundColor: colors.border,
     marginVertical: 6,
   },
+  pubSearchHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  pubSearchInputWrap: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: colors.surfaceHigher, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: 12, height: 42, marginBottom: 10,
+  },
+  pubSearchInput: { flex: 1, ...T.body, color: colors.text, padding: 0 },
+  pubSearchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.border + '60',
+  },
+  pubSearchIconWrap: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  pubSearchName: { ...T.body, color: colors.text, flex: 1 },
+  pubSearchEmpty: { ...T.caption, color: colors.textMuted, textAlign: 'center', paddingVertical: 24 },
   noteInput: {
     ...T.body,
     color: colors.text,

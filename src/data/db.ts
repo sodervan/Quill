@@ -35,6 +35,14 @@ export async function initDb(): Promise<void> {
       followed_at INTEGER NOT NULL
     );
 
+    -- Muting a publication keeps it followed (still tracked, still shows in "following"
+    -- counts) but suppresses its articles from the feed — distinct from unfollow (fully
+    -- removes it) and from per-article "hide" (session-only, cleared on refresh).
+    CREATE TABLE IF NOT EXISTS muted_publications (
+      id TEXT PRIMARY KEY,
+      muted_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS articles (
       id TEXT PRIMARY KEY,
       publication_id TEXT NOT NULL,
@@ -202,7 +210,15 @@ export async function initDb(): Promise<void> {
     } catch {}
   }
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '15')`);
+  // v16: track book-only pages/seconds alongside the existing combined (article+book)
+  //      daily_log columns, so stat cards can show an articles-vs-books breakdown
+  //      without changing what already feeds the daily goal.
+  if (verNum < 16) {
+    try { await db.execAsync(`ALTER TABLE daily_log ADD COLUMN book_pages_read INTEGER NOT NULL DEFAULT 0`); } catch {}
+    try { await db.execAsync(`ALTER TABLE daily_log ADD COLUMN book_reading_seconds INTEGER NOT NULL DEFAULT 0`); } catch {}
+  }
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '16')`);
 }
 
 // --- Settings helpers ---
@@ -269,6 +285,26 @@ export async function unfollowPublication(id: string): Promise<void> {
 export async function getFollowedIds(): Promise<string[]> {
   const db = getDb();
   const rows = await db.getAllAsync<{ id: string }>(`SELECT id FROM followed_publications ORDER BY followed_at`);
+  return rows.map((r) => r.id);
+}
+
+// --- Muted publications (stays followed, but its articles are suppressed from the feed) ---
+
+export async function mutePublication(id: string): Promise<void> {
+  const db = getDb();
+  await db.runAsync(`INSERT OR IGNORE INTO muted_publications (id, muted_at) VALUES (?, ?)`, [id, Date.now()]);
+  import('../lib/sync').then((m) => m.syncMute(id)).catch(() => {});
+}
+
+export async function unmutePublication(id: string): Promise<void> {
+  const db = getDb();
+  await db.runAsync(`DELETE FROM muted_publications WHERE id = ?`, [id]);
+  import('../lib/sync').then((m) => m.syncUnmute(id)).catch(() => {});
+}
+
+export async function getMutedIds(): Promise<string[]> {
+  const db = getDb();
+  const rows = await db.getAllAsync<{ id: string }>(`SELECT id FROM muted_publications`);
   return rows.map((r) => r.id);
 }
 
@@ -381,14 +417,7 @@ export async function recordPageRead(articleId: string, pagesRead: number, total
        ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + excluded.pages_read`,
       [key, delta],
     );
-    const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number; reading_seconds: number }>(
-      `SELECT qualifying_reads, pages_read, reading_seconds FROM daily_log WHERE date = ?`, [key],
-    );
-    if (row) {
-      import('../lib/sync').then((m) =>
-        m.syncDailyLog(key, row.qualifying_reads, row.pages_read, row.reading_seconds ?? 0)
-      ).catch(() => {});
-    }
+    await syncDailyLogRow(key);
   }
 
   import('../lib/sync').then((m) => m.syncReadingProgress(articleId)).catch(() => {});
@@ -423,14 +452,7 @@ export async function recordScrollProgress(articleId: string, depth: number): Pr
        ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + 1`,
       [key],
     );
-    const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number; reading_seconds: number }>(
-      `SELECT qualifying_reads, pages_read, reading_seconds FROM daily_log WHERE date = ?`, [key],
-    );
-    if (row) {
-      import('../lib/sync').then((m) =>
-        m.syncDailyLog(key, row.qualifying_reads, row.pages_read, row.reading_seconds ?? 0)
-      ).catch(() => {});
-    }
+    await syncDailyLogRow(key);
   }
 
   import('../lib/sync').then((m) => m.syncReadingProgress(articleId)).catch(() => {});
@@ -468,15 +490,7 @@ async function incrementDailyLog(qualifying: number, secondsRead: number): Promi
        reading_seconds = reading_seconds + excluded.reading_seconds`,
     [key, qualifying, secondsRead],
   );
-  // Read the FULL row so pages_read isn't overwritten to 0 in Firestore
-  const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number; reading_seconds: number }>(
-    `SELECT qualifying_reads, pages_read, reading_seconds FROM daily_log WHERE date = ?`, [key],
-  );
-  if (row) {
-    import('../lib/sync').then((m) =>
-      m.syncDailyLog(key, row.qualifying_reads, row.pages_read ?? 0, row.reading_seconds ?? 0)
-    ).catch(() => {});
-  }
+  await syncDailyLogRow(key);
 }
 
 // --- Saved articles ---
@@ -553,16 +567,48 @@ export async function logBookPages(delta: number): Promise<void> {
   const db = getDb();
   const key = todayKey();
   await db.runAsync(
-    `INSERT INTO daily_log (date, qualifying_reads, pages_read) VALUES (?, 0, ?)
-     ON CONFLICT(date) DO UPDATE SET pages_read = pages_read + excluded.pages_read`,
-    [key, delta],
+    `INSERT INTO daily_log (date, qualifying_reads, pages_read, book_pages_read) VALUES (?, 0, ?, ?)
+     ON CONFLICT(date) DO UPDATE SET
+       pages_read = pages_read + excluded.pages_read,
+       book_pages_read = book_pages_read + excluded.book_pages_read`,
+    [key, delta, delta],
   );
-  const row = await db.getFirstAsync<{ qualifying_reads: number; pages_read: number; reading_seconds: number }>(
-    `SELECT qualifying_reads, pages_read, reading_seconds FROM daily_log WHERE date = ?`, [key],
+  await syncDailyLogRow(key);
+}
+
+/** Book-reading equivalent of logReadEvent — accrues into the same combined
+ *  reading_seconds the "Read Today" stat already shows, plus a book-only column
+ *  so the stat card can break the total down into articles vs books. */
+export async function logBookReadEvent(secondsRead: number): Promise<void> {
+  if (secondsRead <= 0) return;
+  const db = getDb();
+  const key = todayKey();
+  await db.runAsync(
+    `INSERT INTO daily_log (date, qualifying_reads, pages_read, reading_seconds, book_reading_seconds)
+     VALUES (?, 0, 0, ?, ?)
+     ON CONFLICT(date) DO UPDATE SET
+       reading_seconds = reading_seconds + excluded.reading_seconds,
+       book_reading_seconds = book_reading_seconds + excluded.book_reading_seconds`,
+    [key, secondsRead, secondsRead],
+  );
+  await syncDailyLogRow(key);
+}
+
+async function syncDailyLogRow(key: string): Promise<void> {
+  const db = getDb();
+  const row = await db.getFirstAsync<{
+    qualifying_reads: number; pages_read: number; reading_seconds: number;
+    book_pages_read: number; book_reading_seconds: number;
+  }>(
+    `SELECT qualifying_reads, pages_read, reading_seconds, book_pages_read, book_reading_seconds
+     FROM daily_log WHERE date = ?`, [key],
   );
   if (row) {
     import('../lib/sync').then((m) =>
-      m.syncDailyLog(key, row.qualifying_reads, row.pages_read, row.reading_seconds ?? 0)
+      m.syncDailyLog(
+        key, row.qualifying_reads, row.pages_read, row.reading_seconds ?? 0,
+        row.book_pages_read ?? 0, row.book_reading_seconds ?? 0,
+      )
     ).catch(() => {});
   }
 }
@@ -688,6 +734,28 @@ export async function getTodayReadingSeconds(): Promise<number> {
     `SELECT reading_seconds FROM daily_log WHERE date = ?`, [todayKey()],
   );
   return row?.reading_seconds ?? 0;
+}
+
+/** Splits today's combined pages/seconds totals into articles-vs-books, for the
+ *  expandable "Pages today" / "Read today" stat cards. */
+export async function getTodayStatsBreakdown(): Promise<{
+  articleSeconds: number; bookSeconds: number; articlePages: number; bookPages: number;
+}> {
+  const db = getDb();
+  const row = await db.getFirstAsync<{
+    pages_read: number; reading_seconds: number; book_pages_read: number; book_reading_seconds: number;
+  }>(
+    `SELECT pages_read, reading_seconds, book_pages_read, book_reading_seconds FROM daily_log WHERE date = ?`,
+    [todayKey()],
+  );
+  const bookPages = row?.book_pages_read ?? 0;
+  const bookSeconds = row?.book_reading_seconds ?? 0;
+  return {
+    articlePages: Math.max(0, (row?.pages_read ?? 0) - bookPages),
+    bookPages,
+    articleSeconds: Math.max(0, (row?.reading_seconds ?? 0) - bookSeconds),
+    bookSeconds,
+  };
 }
 
 // --- Remote sources (dynamically followed feeds, e.g. from Feedly search) ---

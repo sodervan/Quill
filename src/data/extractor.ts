@@ -4,6 +4,8 @@ import { htmlToPlainText } from './rss';
 export const WORDS_PER_PAGE = 275;
 
 export interface ArticleContent {
+  /** Cleaned HTML with real paragraph/image structure preserved — feed the reader's WebView with this. */
+  html: string;
   plainText: string;
   pages: string[];
   wordCount: number;
@@ -50,29 +52,40 @@ export async function resolveArticleContent(
   feedContentHtml?: string,
 ): Promise<ArticleContent | null> {
   try {
-    let plainText: string;
+    let html: string;
 
     if (feedContentHtml) {
-      plainText = htmlToPlainText(feedContentHtml);
+      html = feedContentHtml;
     } else {
       const res = await fetchArticle(articleUrl);
       if (!res) return null;
-      const html = await res.text();
-      plainText = extractMainText(html);
+      const rawHtml = await res.text();
+      html = extractMainHtml(rawHtml);
     }
+    if (!html) return null;
 
+    html = absolutizeUrls(promoteLazyImages(html), articleUrl);
+
+    const plainText = htmlToPlainText(html);
     if (plainText.length < 100) return null;
-    return buildPages(plainText);
+
+    const { pages, wordCount } = buildPages(plainText);
+    return { html, plainText, pages, wordCount };
   } catch {
     return null;
   }
 }
 
-function extractMainText(html: string): string {
+/**
+ * Extract the main content container's inner HTML (keeping real <p>/<img> structure)
+ * instead of flattened .text — a flat string loses every paragraph break and strips
+ * all images, which is why scrape-fallback articles used to render as one text wall.
+ */
+function extractMainHtml(html: string): string {
   const root = parse(html);
 
   // Remove noise nodes
-  for (const tag of ['script', 'style', 'nav', 'header', 'footer', 'aside', 'noscript', 'iframe']) {
+  for (const tag of ['script', 'style', 'nav', 'header', 'footer', 'aside', 'noscript', 'iframe', 'form', 'svg']) {
     root.querySelectorAll(tag).forEach((n) => n.remove());
   }
 
@@ -92,23 +105,51 @@ function extractMainText(html: string): string {
     const el = root.querySelector(sel);
     if (el) {
       const text = el.text.replace(/\s+/g, ' ').trim();
-      if (text.length > 200) return text;
+      if (text.length > 200) return el.innerHTML;
     }
   }
 
   // Last resort: grab all paragraphs
   const paras = root.querySelectorAll('p');
-  const text = paras.map((p) => p.text.trim()).filter((t) => t.length > 40).join('\n\n');
-  return text.replace(/\s+/g, ' ').trim();
+  const kept = paras.filter((p) => p.text.trim().length > 40);
+  return kept.map((p) => p.outerHTML).join('\n');
 }
 
-function buildPages(plainText: string): ArticleContent {
+/** Many blogs lazy-load images behind data-src/data-lazy-src with a blank placeholder
+ *  in src — promote the real URL so it actually renders. */
+function promoteLazyImages(html: string): string {
+  return html.replace(/<img\b([^>]*)>/gi, (match, attrs) => {
+    const srcMatch = attrs.match(/\bsrc="([^"]*)"/i);
+    const hasRealSrc = srcMatch && srcMatch[1].trim().length > 0 && !/^data:image\/gif/i.test(srcMatch[1]);
+    if (hasRealSrc) return match;
+    const lazy = attrs.match(/\bdata-(?:src|lazy-src|original)="([^"]+)"/i);
+    if (!lazy) return match;
+    return `<img${attrs} src="${lazy[1]}">`;
+  });
+}
+
+/** Scraped pages often use relative image/link URLs — resolve them against the
+ *  article's own URL so they load inside the reader's baseUrl-less WebView. */
+function absolutizeUrls(html: string, baseUrl: string): string {
+  return html
+    .replace(/(<img\b[^>]*\bsrc=")([^"]+)(")/gi, (m, pre, src, post) => {
+      if (/^(data:|https?:)/i.test(src)) return m;
+      try { return pre + new URL(src, baseUrl).href + post; } catch { return m; }
+    })
+    .replace(/(<a\b[^>]*\bhref=")([^"]+)(")/gi, (m, pre, href, post) => {
+      if (/^(https?:|mailto:|#)/i.test(href)) return m;
+      try { return pre + new URL(href, baseUrl).href + post; } catch { return m; }
+    })
+    .replace(/\ssrcset="[^"]*"/gi, '');
+}
+
+function buildPages(plainText: string): { pages: string[]; wordCount: number } {
   const words = plainText.split(/\s+/).filter(Boolean);
   const pages: string[] = [];
   for (let i = 0; i < words.length; i += WORDS_PER_PAGE) {
     pages.push(words.slice(i, i + WORDS_PER_PAGE).join(' '));
   }
-  return { plainText, pages, wordCount: words.length };
+  return { pages, wordCount: words.length };
 }
 
 export function wordCountToPages(wordCount: number): number {

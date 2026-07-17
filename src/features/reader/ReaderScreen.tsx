@@ -29,6 +29,7 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Reader'>;
 
 const { height: SCREEN_H, width: SCREEN_W } = Dimensions.get('window');
 const LOOKUP_H = Math.min(Math.round(SCREEN_H * 0.85), 700);
+const HL_LIST_H = Math.min(560, SCREEN_H * 0.72);
 const READER_FONT = 18;
 const READER_LINE = 30;
 
@@ -80,6 +81,14 @@ export default function ReaderScreen({ route, navigation }: Props) {
   const lookupAnimY = useRef(new Animated.Value(LOOKUP_H)).current;
   const lookupAnimBg = useRef(new Animated.Value(0)).current;
   const [lookupMounted, setLookupMounted] = useState(false);
+
+  // ── Highlights list sheet ──
+  const [listMounted, setListMounted] = useState(false);
+  const listAnimY = useRef(new Animated.Value(HL_LIST_H)).current;
+  const listAnimBg = useRef(new Animated.Value(0)).current;
+  // Set when locating a highlight requires switching out of pages mode first — picked
+  // up by onWebViewLoadEnd once the WebView (re)mounts in scroll mode.
+  const pendingLocateIdRef = useRef<number | null>(null);
 
   const [initialPage, setInitialPage] = useState(0);
 
@@ -138,9 +147,9 @@ export default function ReaderScreen({ route, navigation }: Props) {
           setWordCount(scraped.wordCount);
           setPages(scraped.pages);
           setStableHtml(buildStyledHtml(
-            scraped.pages.join('\n\n'),
+            scraped.html,
             article.title,
-            false,
+            true,
             existingHighlights,
             isDark,
           ));
@@ -158,9 +167,9 @@ export default function ReaderScreen({ route, navigation }: Props) {
       setPages(content.pages);
       // Build HTML once with existing highlights baked in — never rebuilt on highlight changes
       setStableHtml(buildStyledHtml(
-            article.content_html ?? content.pages.join('\n\n'),
+            content.html,
             article.title,
-            !!article.content_html,
+            true,
             existingHighlights,
             isDark,
             readingTheme,
@@ -264,8 +273,56 @@ export default function ReaderScreen({ route, navigation }: Props) {
     });
   }
 
+  // ── Highlights list sheet: open/close/locate ──
+  function openList() {
+    setListMounted(true);
+    Animated.parallel([
+      Animated.spring(listAnimY, { toValue: 0, tension: 80, friction: 13, useNativeDriver: true }),
+      Animated.timing(listAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }
+
+  function closeList(cb?: () => void) {
+    Animated.parallel([
+      Animated.timing(listAnimY, { toValue: HL_LIST_H, duration: 260, useNativeDriver: true }),
+      Animated.timing(listAnimBg, { toValue: 0, duration: 220, useNativeDriver: true }),
+    ]).start(() => { setListMounted(false); cb?.(); });
+  }
+
+  function scrollToHighlightMark(id: number) {
+    webViewRef.current?.injectJavaScript(`
+      (function(){
+        var id=${id}, tries=0;
+        function go(){
+          var el=document.querySelector('mark[data-highlight-id="'+id+'"]');
+          if(el){ el.scrollIntoView({block:'center',behavior:'smooth'}); return; }
+          if(tries<20){ tries++; setTimeout(go,120); }
+        }
+        setTimeout(go,150);
+      })();true;
+    `);
+  }
+
+  function locateHighlight(id: number) {
+    closeList(() => {
+      if (scrollMode !== 'scroll') {
+        pendingLocateIdRef.current = id;
+        setScrollMode('scroll');
+        return;
+      }
+      scrollToHighlightMark(id);
+    });
+  }
+
   function onWebViewLoadEnd() {
     const depth = restoreDepthRef.current;
+
+    if (pendingLocateIdRef.current != null) {
+      const id = pendingLocateIdRef.current;
+      pendingLocateIdRef.current = null;
+      scrollToHighlightMark(id);
+      return;
+    }
 
     // Arriving from a highlight tap — scroll to the highlighted text instead of the
     // last-read position. Falls back to the normal depth-based restore if the mark
@@ -399,6 +456,16 @@ export default function ReaderScreen({ route, navigation }: Props) {
                 size={18}
                 color={saved ? colors.accent : colors.textSecondary}
               />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={openList} hitSlop={12} style={[s.iconCircle, { position: 'relative' }]}>
+              <Ionicons name="list-outline" size={18} color={colors.textSecondary} />
+              {highlights.length > 0 && (
+                <View style={[s.hlBadge, { backgroundColor: colors.accent }]}>
+                  <Text style={[s.hlBadgeText, { color: colors.bg }]}>
+                    {highlights.length > 99 ? '99+' : highlights.length}
+                  </Text>
+                </View>
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -623,6 +690,49 @@ export default function ReaderScreen({ route, navigation }: Props) {
             source={{ uri: `https://www.google.com/search?q=${encodeURIComponent(lookupText)}` }}
             style={{ flex: 1 }}
           />
+        </Animated.View>
+      )}
+
+      {/* ── Highlights list sheet ── */}
+      {listMounted && (
+        <TouchableWithoutFeedback onPress={() => closeList()}>
+          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.65)', opacity: listAnimBg }]} />
+        </TouchableWithoutFeedback>
+      )}
+      {listMounted && (
+        <Animated.View style={[s.hlListSheet, { height: HL_LIST_H, transform: [{ translateY: listAnimY }] }]}>
+          <View style={s.lookupHandle} />
+          <View style={s.hlListHeader}>
+            <Text style={s.hlListTitle}>
+              Highlights{highlights.length > 0 ? ` · ${highlights.length}` : ''}
+            </Text>
+            <TouchableOpacity onPress={() => closeList()} hitSlop={10}>
+              <Ionicons name="close" size={22} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+
+          {highlights.length === 0 ? (
+            <View style={s.hlListEmpty}>
+              <Ionicons name="color-wand-outline" size={40} color={colors.textMuted} />
+              <Text style={s.hlListEmptyText}>No highlights yet</Text>
+              <Text style={s.hlListEmptySub}>Select text while reading to highlight it.</Text>
+            </View>
+          ) : (
+            <ScrollView contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+              {highlights.map((h) => (
+                <TouchableOpacity
+                  key={h.id}
+                  style={s.hlItem}
+                  onPress={() => locateHighlight(h.id)}
+                  activeOpacity={0.75}
+                >
+                  <View style={[s.hlAccent, { backgroundColor: h.color }]} />
+                  <Text style={s.hlText} numberOfLines={3}>{h.selected_text}</Text>
+                  <Ionicons name="locate-outline" size={18} color={colors.accent} />
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          )}
         </Animated.View>
       )}
     </View>
@@ -1041,4 +1151,33 @@ function createReaderStyles(colors: ReturnType<typeof useColors>) { return Style
     borderBottomWidth: 1, borderBottomColor: colors.border,
   },
   lookupTitle: { ...T.caption, color: colors.text, fontStyle: 'italic', flex: 1 },
+  hlBadge: {
+    position: 'absolute', top: 2, right: 2,
+    minWidth: 16, height: 16, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3,
+  },
+  hlBadgeText: { fontSize: 10, fontWeight: '800' },
+  hlListSheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
+    borderWidth: 1, borderColor: colors.border,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.3, shadowRadius: 12,
+    elevation: 20,
+  },
+  hlListHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: space.lg, paddingVertical: space.md,
+  },
+  hlListTitle: { ...T.h2, color: colors.text },
+  hlListEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 40, marginTop: 20 },
+  hlListEmptyText: { ...T.h3, color: colors.text },
+  hlListEmptySub: { ...T.caption, color: colors.textMuted, textAlign: 'center', lineHeight: 20 },
+  hlItem: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingHorizontal: space.lg, paddingVertical: 14,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  hlAccent: { width: 4, alignSelf: 'stretch', borderRadius: 2 },
+  hlText: { ...T.body, fontSize: 14, lineHeight: 21, color: colors.text, flex: 1 },
 }); }

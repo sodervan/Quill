@@ -2,7 +2,7 @@ import React, { useCallback, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   StatusBar, DeviceEventEmitter, Modal, Pressable,
-  Animated,
+  Animated, LayoutAnimation,
 } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -12,6 +12,7 @@ import { signOut } from 'firebase/auth';
 import {
   computeStreak, computeBestStreak, getTodayPages, getDailyGoal, setDailyGoal,
   getFollowedIds, setSetting, getDailyLogHistory, getArticlesReadCount, getTodayReadingSeconds,
+  getTodayStatsBreakdown, getSavedIds,
 } from '../../data/db';
 import { getAllBooks } from '../../data/books';
 import { auth } from '../../lib/firebase';
@@ -171,6 +172,14 @@ export default function ProfileScreen() {
   const [totalBookPages, setTotalBookPages] = useState(0);
   const [articlesRead, setArticlesRead] = useState(0);
   const [todayReadingSeconds, setTodayReadingSeconds] = useState(0);
+  const [savedCount, setSavedCount] = useState(0);
+  const [statsBreakdown, setStatsBreakdown] = useState({ articleSeconds: 0, bookSeconds: 0, articlePages: 0, bookPages: 0 });
+  const [expandedStat, setExpandedStat] = useState<'pages' | 'time' | 'streak' | null>(null);
+
+  function toggleExpandedStat(kind: 'pages' | 'time' | 'streak') {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpandedStat((cur) => (cur === kind ? null : kind));
+  }
 
   const userEmail = auth.currentUser?.email ?? null;
 
@@ -178,9 +187,10 @@ export default function ProfileScreen() {
     useCallback(() => {
       let active = true;
       (async () => {
-        const [str, best, p, g, f, hist, bookList, artCount, secs] = await Promise.all([
+        const [str, best, p, g, f, hist, bookList, artCount, secs, breakdown, saved] = await Promise.all([
           computeStreak(), computeBestStreak(), getTodayPages(), getDailyGoal(), getFollowedIds(),
           getDailyLogHistory(WEEKS * 7), getAllBooks(), getArticlesReadCount(), getTodayReadingSeconds(),
+          getTodayStatsBreakdown(), getSavedIds(),
         ]);
         if (active) {
           setStreak(str); setBestStreak(best); setTodayPages(p); setGoal(g); setFollowedCount(f.length);
@@ -190,6 +200,8 @@ export default function ProfileScreen() {
           setTotalBookPages(bookList.reduce((acc, b) => acc + (b.current_page || 0), 0));
           setArticlesRead(artCount);
           setTodayReadingSeconds(secs);
+          setStatsBreakdown(breakdown);
+          setSavedCount(saved.size);
         }
       })();
       return () => { active = false; };
@@ -349,22 +361,105 @@ export default function ProfileScreen() {
           {/* Overview row — streaks & goal progress span both articles and books, so they don't belong under either */}
           <Text style={s.statsSubLabel}>Overview</Text>
           <View style={[s.statsRow, { marginBottom: 10 }]}>
-            <View style={[s.card, s.statCard]}>
+            <TouchableOpacity
+              style={[s.card, s.statCard]}
+              onPress={() => toggleExpandedStat('streak')}
+              activeOpacity={0.75}
+            >
               <Ionicons name="flame" size={24} color={colors.flame} />
               <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{streak}</Text>
-              <Text style={s.statLabel}>Day streak</Text>
-            </View>
-            <View style={[s.card, s.statCard]}>
-              <Ionicons name="trophy-outline" size={24} color={colors.accent} />
-              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{bestStreak}</Text>
-              <Text style={s.statLabel}>Best streak</Text>
-            </View>
-            <View style={[s.card, s.statCard]}>
+              <View style={s.statLabelRow}>
+                <Text style={s.statLabel}>Day streak</Text>
+                <Ionicons
+                  name={expandedStat === 'streak' ? 'chevron-up' : 'chevron-down'}
+                  size={11} color={colors.textMuted}
+                />
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.card, s.statCard]}
+              onPress={() => toggleExpandedStat('pages')}
+              activeOpacity={0.75}
+            >
               <Ionicons name="today-outline" size={24} color={colors.success} />
               <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{todayPages}</Text>
-              <Text style={s.statLabel}>Pages today</Text>
-            </View>
+              <View style={s.statLabelRow}>
+                <Text style={s.statLabel}>Pages today</Text>
+                <Ionicons
+                  name={expandedStat === 'pages' ? 'chevron-up' : 'chevron-down'}
+                  size={11} color={colors.textMuted}
+                />
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.card, s.statCard]}
+              onPress={() => toggleExpandedStat('time')}
+              activeOpacity={0.75}
+            >
+              <Ionicons name="time-outline" size={24} color={colors.flame} />
+              <Text
+                style={[s.statNum, { fontSize: formatDuration(todayReadingSeconds).includes(' ') ? 22 : 28 }]}
+                numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}
+              >
+                {formatDuration(todayReadingSeconds)}
+              </Text>
+              <View style={s.statLabelRow}>
+                <Text style={s.statLabel}>Read today</Text>
+                <Ionicons
+                  name={expandedStat === 'time' ? 'chevron-up' : 'chevron-down'}
+                  size={11} color={colors.textMuted}
+                />
+              </View>
+            </TouchableOpacity>
           </View>
+
+          {expandedStat === 'streak' && (
+            <View style={[s.card, s.breakdownPanel]}>
+              <View style={s.breakdownRow}>
+                <Ionicons name="flame" size={18} color={colors.flame} />
+                <Text style={s.breakdownLabel}>Current streak</Text>
+                <Text style={s.breakdownValue}>{streak} {streak === 1 ? 'day' : 'days'}</Text>
+              </View>
+              <View style={s.breakdownDivider} />
+              <View style={s.breakdownRow}>
+                <Ionicons name="trophy-outline" size={18} color={colors.accent} />
+                <Text style={s.breakdownLabel}>Best streak</Text>
+                <Text style={s.breakdownValue}>{bestStreak} {bestStreak === 1 ? 'day' : 'days'}</Text>
+              </View>
+            </View>
+          )}
+
+          {expandedStat === 'pages' && (
+            <View style={[s.card, s.breakdownPanel]}>
+              <View style={s.breakdownRow}>
+                <Ionicons name="newspaper-outline" size={18} color={colors.accent} />
+                <Text style={s.breakdownLabel}>Articles</Text>
+                <Text style={s.breakdownValue}>{statsBreakdown.articlePages}</Text>
+              </View>
+              <View style={s.breakdownDivider} />
+              <View style={s.breakdownRow}>
+                <Ionicons name="book-outline" size={18} color={colors.accent} />
+                <Text style={s.breakdownLabel}>Books</Text>
+                <Text style={s.breakdownValue}>{statsBreakdown.bookPages}</Text>
+              </View>
+            </View>
+          )}
+
+          {expandedStat === 'time' && (
+            <View style={[s.card, s.breakdownPanel]}>
+              <View style={s.breakdownRow}>
+                <Ionicons name="newspaper-outline" size={18} color={colors.accent} />
+                <Text style={s.breakdownLabel}>Articles</Text>
+                <Text style={s.breakdownValue}>{formatDuration(statsBreakdown.articleSeconds)}</Text>
+              </View>
+              <View style={s.breakdownDivider} />
+              <View style={s.breakdownRow}>
+                <Ionicons name="book-outline" size={18} color={colors.accent} />
+                <Text style={s.breakdownLabel}>Books</Text>
+                <Text style={s.breakdownValue}>{formatDuration(statsBreakdown.bookSeconds)}</Text>
+              </View>
+            </View>
+          )}
 
           {/* Articles row */}
           <Text style={s.statsSubLabel}>Articles</Text>
@@ -375,9 +470,9 @@ export default function ProfileScreen() {
               <Text style={s.statLabel}>Articles read</Text>
             </View>
             <View style={[s.card, s.statCard]}>
-              <Ionicons name="time-outline" size={24} color={colors.flame} />
-              <Text style={[s.statNum, { fontSize: 22 }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{formatDuration(todayReadingSeconds)}</Text>
-              <Text style={s.statLabel}>Read today</Text>
+              <Ionicons name="bookmark-outline" size={24} color={colors.flame} />
+              <Text style={s.statNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>{savedCount}</Text>
+              <Text style={s.statLabel}>Saved</Text>
             </View>
             <View style={[s.card, s.statCard]}>
               <Ionicons name="compass-outline" size={24} color={colors.success} />
@@ -577,10 +672,16 @@ function createProfileStyles(colors: ReturnType<typeof useColors>) { return Styl
   statsSubLabel: { ...T.caption, color: colors.textMuted, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6, marginTop: 4 },
   statCard: { flex: 1, alignItems: 'center', paddingVertical: space.md, paddingHorizontal: 4 },
   statNum: {
-    fontSize: 28, fontWeight: '800', color: colors.text, marginTop: 6, marginBottom: 2,
+    fontSize: 28, lineHeight: 32, fontWeight: '800', color: colors.text, marginTop: 6, marginBottom: 2,
     alignSelf: 'stretch', textAlign: 'center',
   },
   statLabel: { ...T.caption, color: colors.textMuted },
+  statLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  breakdownPanel: { marginTop: 8, marginBottom: 10, paddingVertical: 4 },
+  breakdownRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  breakdownDivider: { height: 1, backgroundColor: colors.border },
+  breakdownLabel: { ...T.body, color: colors.text, flex: 1 },
+  breakdownValue: { ...T.body, color: colors.textSecondary, fontWeight: '700' },
   divider: { height: 1, backgroundColor: colors.border },
   settingVal: { ...T.caption, color: colors.textMuted },
   srRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12 },

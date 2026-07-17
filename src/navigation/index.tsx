@@ -36,7 +36,7 @@ export type RootStackParamList = {
   Reader: { articleId: string; publicationId: string; highlightId?: number };
   Highlights: undefined;
   History: undefined;
-  BookReader: { bookId: string; initialPage?: number };
+  BookReader: { bookId: string; initialPage?: number; highlightId?: string };
 };
 
 type IoniconsName = React.ComponentProps<typeof Ionicons>['name'];

@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   StatusBar, ActivityIndicator, ScrollView, Animated,
   Modal, Pressable, Share, Linking, PanResponder,
+  NativeScrollEvent, NativeSyntheticEvent, TextInput, Dimensions,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { useFocusEffect } from '@react-navigation/native';
@@ -21,6 +22,9 @@ import { FaviconAvatar } from '../../components/FaviconAvatar';
 import { AppAlert } from '../../components/AppAlert';
 
 const SWIPE_THRESHOLD = 88;
+const SCROLL_TOP_THRESHOLD = 400;
+const PUB_SEARCH_H = Math.min(560, Dimensions.get('window').height * 0.75);
+const CHIP_ROW_CAP = 30;
 
 // A completed swipe never removes outright: it springs back and asks for confirmation
 // via onRequestRemove, since a swipe is easy to trigger by accident.
@@ -123,6 +127,37 @@ export default function LibraryScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [progressMap, setProgressMap] = useState<Map<string, number>>(new Map());
   const [activePubId, setActivePubId] = useState<string | null>(null);
+  const flatListRef = useRef<FlatList>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+
+  // Searchable publication filter list — same "find one by typing" fallback as the Feed page.
+  const pubSearchAnimY = useRef(new Animated.Value(PUB_SEARCH_H)).current;
+  const pubSearchAnimBg = useRef(new Animated.Value(0)).current;
+  const [pubSearchMounted, setPubSearchMounted] = useState(false);
+  const [pubSearchQuery, setPubSearchQuery] = useState('');
+
+  function openPubSearch() {
+    setPubSearchQuery('');
+    pubSearchAnimY.setValue(PUB_SEARCH_H);
+    pubSearchAnimBg.setValue(0);
+    setPubSearchMounted(true);
+    Animated.parallel([
+      Animated.spring(pubSearchAnimY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 13 }),
+      Animated.timing(pubSearchAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }
+
+  function closePubSearch() {
+    Animated.parallel([
+      Animated.timing(pubSearchAnimY, { toValue: PUB_SEARCH_H, duration: 260, useNativeDriver: true }),
+      Animated.timing(pubSearchAnimBg, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => setPubSearchMounted(false));
+  }
+
+  function selectPubFromSearch(id: string | null) {
+    setActivePubId(id);
+    closePubSearch();
+  }
 
   // Bottom sheet modal state
   const [selectedArticle, setSelectedArticle] = useState<ArticleRow | null>(null);
@@ -199,6 +234,18 @@ export default function LibraryScreen({ navigation }: Props) {
     closeArticleMenu();
   }
 
+  // ── Scroll-to-top ──────────────────────────────────────────────────────────
+
+  function handleScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
+    const y = e.nativeEvent.contentOffset.y;
+    setShowScrollTop(y > SCROLL_TOP_THRESHOLD);
+  }
+
+  function scrollToTop() {
+    flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }
+
   async function handleRemoveArticle(articleId: string) {
     await handleUnsave(articleId);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -267,6 +314,10 @@ export default function LibraryScreen({ navigation }: Props) {
     [saved, activePubId],
   );
 
+  const pubSearchResults = pubSearchQuery.trim()
+    ? uniquePubs.filter((p) => p.name.toLowerCase().includes(pubSearchQuery.trim().toLowerCase()))
+    : uniquePubs;
+
   if (loading) {
     return (
       <View style={[s.root, { alignItems: 'center', justifyContent: 'center' }]}>
@@ -299,6 +350,10 @@ export default function LibraryScreen({ navigation }: Props) {
           contentContainerStyle={s.filterRow}
           style={s.filterScroll}
         >
+          <TouchableOpacity style={s.filterChip} onPress={openPubSearch} activeOpacity={0.7}>
+            <Ionicons name="search-outline" size={14} color={colors.textMuted} />
+            <Text style={s.filterChipText}>Search</Text>
+          </TouchableOpacity>
           <TouchableOpacity
             style={[s.filterChip, activePubId === null && s.filterChipActive]}
             onPress={() => setActivePubId(null)}
@@ -308,7 +363,7 @@ export default function LibraryScreen({ navigation }: Props) {
               All
             </Text>
           </TouchableOpacity>
-          {uniquePubs.map((pub) => {
+          {uniquePubs.slice(0, CHIP_ROW_CAP).map((pub) => {
             const isActive = activePubId === pub.id;
             return (
               <TouchableOpacity
@@ -352,10 +407,13 @@ export default function LibraryScreen({ navigation }: Props) {
         </View>
       ) : (
         <FlatList
+          ref={flatListRef}
           data={filteredSaved}
           keyExtractor={(a) => a.id}
           contentContainerStyle={s.list}
           showsVerticalScrollIndicator={false}
+          onScroll={handleScroll}
+          scrollEventThrottle={16}
           renderItem={({ item }) => {
             const pi = pubInfo(item);
             const c = pi.color;
@@ -428,6 +486,13 @@ export default function LibraryScreen({ navigation }: Props) {
             );
           }}
         />
+      )}
+
+      {/* ── Scroll to top FAB ── */}
+      {showScrollTop && (
+        <TouchableOpacity style={s.scrollTopBtn} onPress={scrollToTop} activeOpacity={0.85}>
+          <Ionicons name="arrow-up" size={20} color={colors.bg} />
+        </TouchableOpacity>
       )}
 
       {/* ── Context Menu Bottom Sheet Modal ── */}
@@ -541,6 +606,81 @@ export default function LibraryScreen({ navigation }: Props) {
           );
         })()}
       </Modal>
+
+      {/* ── Searchable publication filter list ── */}
+      {pubSearchMounted && (
+        <Modal transparent animationType="none" visible={pubSearchMounted} onRequestClose={closePubSearch} statusBarTranslucent>
+          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.6)', opacity: pubSearchAnimBg }]}>
+            <TouchableOpacity style={StyleSheet.absoluteFill} onPress={closePubSearch} activeOpacity={1} />
+          </Animated.View>
+          <Animated.View
+            style={[
+              s.modalSheet,
+              { height: PUB_SEARCH_H, transform: [{ translateY: pubSearchAnimY }], position: 'absolute', bottom: 0, left: 0, right: 0 },
+            ]}
+          >
+            <View style={s.modalHandle} />
+            <View style={s.pubSearchHeader}>
+              <Text style={s.menuTitle}>Filter by source</Text>
+              <TouchableOpacity onPress={closePubSearch} hitSlop={10}>
+                <Ionicons name="close" size={22} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <View style={s.pubSearchInputWrap}>
+              <Ionicons name="search-outline" size={16} color={colors.textMuted} />
+              <TextInput
+                value={pubSearchQuery}
+                onChangeText={setPubSearchQuery}
+                placeholder="Search saved sources"
+                placeholderTextColor={colors.textMuted}
+                style={s.pubSearchInput}
+                autoCorrect={false}
+                autoFocus
+              />
+              {pubSearchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => setPubSearchQuery('')} hitSlop={8}>
+                  <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+                </TouchableOpacity>
+              )}
+            </View>
+            <FlatList
+              data={pubSearchResults}
+              keyExtractor={(pub) => pub.id}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              initialNumToRender={20}
+              windowSize={5}
+              ListHeaderComponent={
+                <TouchableOpacity style={s.pubSearchRow} onPress={() => selectPubFromSearch(null)} activeOpacity={0.7}>
+                  <View style={[s.pubSearchIconWrap, { backgroundColor: colors.accentMuted }]}>
+                    <Ionicons name="albums-outline" size={16} color={colors.accent} />
+                  </View>
+                  <Text style={s.pubSearchName}>All sources</Text>
+                  {activePubId === null && <Ionicons name="checkmark" size={18} color={colors.accent} />}
+                </TouchableOpacity>
+              }
+              ListEmptyComponent={
+                <Text style={s.pubSearchEmpty}>No sources match "{pubSearchQuery}"</Text>
+              }
+              ListFooterComponent={<View style={{ height: 24 }} />}
+              renderItem={({ item: pub }) => {
+                const active = activePubId === pub.id;
+                return (
+                  <TouchableOpacity
+                    style={s.pubSearchRow}
+                    onPress={() => selectPubFromSearch(active ? null : pub.id)}
+                    activeOpacity={0.7}
+                  >
+                    <FaviconAvatar feedUrl={pub.iconUrl} emoji={pub.emoji} size={20} />
+                    <Text style={s.pubSearchName} numberOfLines={1}>{pub.name}</Text>
+                    {active && <Ionicons name="checkmark" size={18} color={pub.color} />}
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          </Animated.View>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -687,6 +827,22 @@ function createLibraryStyles(colors: ReturnType<typeof useColors>) { return Styl
     backgroundColor: colors.border,
     marginVertical: space.sm,
   },
+  pubSearchHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  pubSearchInputWrap: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: colors.surfaceHigher, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.border,
+    paddingHorizontal: 12, height: 42, marginBottom: 10,
+  },
+  pubSearchInput: { flex: 1, ...T.body, color: colors.text, padding: 0 },
+  pubSearchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.border + '60',
+  },
+  pubSearchIconWrap: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+  pubSearchName: { ...T.body, color: colors.text, flex: 1 },
+  pubSearchEmpty: { ...T.caption, color: colors.textMuted, textAlign: 'center', paddingVertical: 24 },
   swipeBg: {
     ...StyleSheet.absoluteFill,
     alignItems: 'center',
@@ -704,5 +860,13 @@ function createLibraryStyles(colors: ReturnType<typeof useColors>) { return Styl
     fontSize: 11,
     fontWeight: '700',
     marginTop: 2,
+  },
+  scrollTopBtn: {
+    position: 'absolute', bottom: 24, right: 20,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: colors.accent,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 8, shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
   },
 }); }

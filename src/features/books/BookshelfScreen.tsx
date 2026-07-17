@@ -21,6 +21,7 @@ import {
 } from '../../data/books';
 import { RootStackParamList } from '../../navigation';
 import { syncBook } from '../../lib/sync';
+import { AppAlert } from '../../components/AppAlert';
 
 type Nav = NativeStackNavigationProp<RootStackParamList>;
 
@@ -47,6 +48,18 @@ function progressPercent(b: BookRow) {
   if (!b.total_pages) return 0;
   return Math.min(100, Math.round((b.current_page / b.total_pages) * 100));
 }
+const SUPPORTED_BOOK_EXTS = new Set(['epub', 'pdf', 'txt', 'md']);
+
+// Amazon's ebook formats are proprietary (often DRM-wrapped) and not something a
+// hand-rolled parser can safely support — point people at Calibre's free converter
+// instead of silently mis-importing the file as a broken PDF.
+const UNSUPPORTED_BOOK_EXTS: Record<string, string> = {
+  azw3: "AZW3 is Amazon's proprietary Kindle format and often includes DRM. Convert it to EPUB with a free tool like Calibre, then import the EPUB.",
+  azw: "AZW is Amazon's proprietary Kindle format and often includes DRM. Convert it to EPUB with a free tool like Calibre, then import the EPUB.",
+  mobi: "MOBI isn't supported yet. Convert it to EPUB with a free tool like Calibre, then import the EPUB.",
+  kfx: "KFX is Amazon's DRM-protected format and can't be read outside Kindle apps.",
+};
+
 function titleFromFilename(name: string) {
   return name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ').trim();
 }
@@ -237,13 +250,25 @@ export default function BookshelfScreen() {
     if (importing) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'application/epub+zip', 'text/plain', 'text/x-markdown'],
+        // Broad wildcard rather than a MIME whitelist — obscure ebook formats (azw3, mobi…)
+        // often report inconsistent/missing MIME types across platforms, which would hide
+        // them from the picker entirely. We validate by file extension instead, below.
+        type: '*/*',
         copyToCacheDirectory: false,
       });
       if (result.canceled || !result.assets?.length) return;
-      setImporting(true);
       const asset = result.assets[0];
-      const ext = (asset.name?.split('.').pop() ?? 'pdf').toLowerCase();
+      const ext = (asset.name?.split('.').pop() ?? '').toLowerCase();
+
+      if (!SUPPORTED_BOOK_EXTS.has(ext)) {
+        AppAlert.alert(
+          'Unsupported file',
+          UNSUPPORTED_BOOK_EXTS[ext] ?? `".${ext || '?'}" files aren't supported. Quill can read EPUB, PDF, and TXT files.`,
+        );
+        return;
+      }
+
+      setImporting(true);
       const format: BookFormat =
         ext === 'epub' ? 'epub' : ext === 'txt' || ext === 'md' ? 'txt' : 'pdf';
       const rawTitle = titleFromFilename(asset.name ?? 'Book');
