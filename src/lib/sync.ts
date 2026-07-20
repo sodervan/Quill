@@ -152,6 +152,7 @@ export async function syncHighlight(h: HighlightRow): Promise<void> {
       article_id: h.article_id,
       selected_text: h.selected_text,
       color: h.color,
+      note: h.note ?? null,
       created_at: h.created_at,
     });
   } catch {}
@@ -316,7 +317,7 @@ export async function uploadLocalToSupabase(): Promise<void> {
     for (const h of highlights) {
       b3.set(doc(db, 'users', userId, 'highlights', `${safeId(h.article_id)}_${h.created_at}`), {
         article_id: h.article_id, selected_text: h.selected_text,
-        color: h.color, created_at: h.created_at,
+        color: h.color, note: h.note ?? null, created_at: h.created_at,
       });
     }
     await b3.commit();
@@ -495,8 +496,8 @@ export async function restoreFromSupabase(): Promise<void> {
     for (const d of snap.docs) {
       const h = d.data();
       await rawDb.runAsync(
-        `INSERT OR IGNORE INTO highlights (article_id, selected_text, color, created_at) VALUES (?, ?, ?, ?)`,
-        [h.article_id, h.selected_text, h.color, h.created_at],
+        `INSERT OR IGNORE INTO highlights (article_id, selected_text, color, note, created_at) VALUES (?, ?, ?, ?, ?)`,
+        [h.article_id, h.selected_text, h.color, h.note ?? null, h.created_at],
       );
     }
   } catch {}

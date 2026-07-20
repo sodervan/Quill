@@ -36,7 +36,9 @@ const SCROLL_TOP_THRESHOLD = 400;
 const PUB_SEARCH_H = Math.min(560, SCREEN_H * 0.75);
 // Each chip loads a remote favicon — capping how many mount inline keeps the row itself
 // fast even with hundreds of follows; the search sheet (FlatList, virtualized) is the
-// path for finding anything past this cap.
+// path for finding anything past this cap. followedPubs is oldest-followed-first, so
+// the cap is applied from the END (slice(-N)) — otherwise a fresh follow past the cap
+// would never appear in the row at all, only in search.
 const CHIP_ROW_CAP = 30;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -408,6 +410,9 @@ interface SheetState {
   isCompleted: boolean;
   pubName: string;
   pubColor: string;
+  // Long-press from the "Continue reading" strip — that's always an in-progress article,
+  // so the only sensible action is resetting it, not the full save/share/follow menu.
+  unreadOnly?: boolean;
 }
 
 function ActionSheet({
@@ -424,28 +429,37 @@ function ActionSheet({
   const s = useMemo(() => createFeedStyles(colors), [colors]);
   if (!mounted) return null;
 
-  const rows = [
-    {
-      icon: sheet.isSaved ? 'bookmark' : 'bookmark-outline' as any,
-      label: sheet.isSaved ? 'Remove from Library' : 'Save to Library',
-      color: colors.accent,
-      action: 'save',
-    },
-    {
-      icon: sheet.isCompleted ? 'bookmark-outline' : 'checkmark-circle-outline' as any,
-      label: sheet.isCompleted ? 'Mark as unread' : 'Mark as read',
-      color: colors.accent,
-      action: 'toggleRead',
-    },
-    { icon: 'share-outline' as any, label: 'Share article', color: colors.accent, action: 'share' },
-    { icon: 'globe-outline' as any, label: 'Open in browser', color: colors.accent, action: 'browser' },
-    {
-      icon: sheet.isFollowed ? 'person-remove-outline' : 'person-add-outline' as any,
-      label: sheet.isFollowed ? `Unfollow ${sheet.pubName}` : `Follow ${sheet.pubName}`,
-      color: sheet.isFollowed ? colors.danger : colors.success,
-      action: 'follow',
-    },
-  ];
+  const rows = sheet.unreadOnly
+    ? [
+        {
+          icon: 'bookmark-outline' as any,
+          label: 'Mark as unread',
+          color: colors.accent,
+          action: 'markUnread',
+        },
+      ]
+    : [
+        {
+          icon: sheet.isSaved ? 'bookmark' : 'bookmark-outline' as any,
+          label: sheet.isSaved ? 'Remove from Library' : 'Save to Library',
+          color: colors.accent,
+          action: 'save',
+        },
+        {
+          icon: sheet.isCompleted ? 'bookmark-outline' : 'checkmark-circle-outline' as any,
+          label: sheet.isCompleted ? 'Mark as unread' : 'Mark as read',
+          color: colors.accent,
+          action: 'toggleRead',
+        },
+        { icon: 'share-outline' as any, label: 'Share article', color: colors.accent, action: 'share' },
+        { icon: 'globe-outline' as any, label: 'Open in browser', color: colors.accent, action: 'browser' },
+        {
+          icon: sheet.isFollowed ? 'person-remove-outline' : 'person-add-outline' as any,
+          label: sheet.isFollowed ? `Unfollow ${sheet.pubName}` : `Follow ${sheet.pubName}`,
+          color: sheet.isFollowed ? colors.danger : colors.success,
+          action: 'follow',
+        },
+      ];
 
   return (
     <Modal transparent animationType="none" visible={mounted} onRequestClose={onClose} statusBarTranslucent>
@@ -454,9 +468,11 @@ function ActionSheet({
       </Animated.View>
       <Animated.View style={[s.sheet, { transform: [{ translateY: animY }] }]}>
         <View style={s.sheetHandle} />
-        <View style={[s.sheetPubBadge, { backgroundColor: sheet.pubColor + '22', borderColor: sheet.pubColor + '44' }]}>
-          <Text style={[s.sheetPubName, { color: sheet.pubColor }]}>{sheet.pubName}</Text>
-        </View>
+        {sheet.pubName ? (
+          <View style={[s.sheetPubBadge, { backgroundColor: sheet.pubColor + '22', borderColor: sheet.pubColor + '44' }]}>
+            <Text style={[s.sheetPubName, { color: sheet.pubColor }]}>{sheet.pubName}</Text>
+          </View>
+        ) : null}
         <Text style={s.sheetTitle} numberOfLines={3}>{sheet.article?.title}</Text>
         <View style={s.sheetDivider} />
         {rows.map((row) => (
@@ -1016,6 +1032,23 @@ export default function FeedScreen() {
     ]).start();
   }
 
+  // Long-press on a "Continue reading" card — always in-progress, so the only
+  // sensible action is resetting it, not the full save/share/follow menu.
+  function openContinueSheet(article: ArticleRow) {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setSheetData({
+      article, isSaved: false, isFollowed: false, isCompleted: false,
+      pubName: '', pubColor: colors.accent, unreadOnly: true,
+    });
+    sheetAnimY.setValue(500);
+    sheetAnimBg.setValue(0);
+    setSheetMounted(true);
+    Animated.parallel([
+      Animated.spring(sheetAnimY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 13 }),
+      Animated.timing(sheetAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+  }
+
   function closeSheet() {
     Animated.parallel([
       Animated.timing(sheetAnimY, { toValue: 500, duration: 260, useNativeDriver: true }),
@@ -1115,6 +1148,15 @@ export default function FeedScreen() {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         break;
       }
+      case 'markUnread':
+        await toggleArticleRead(article.id, false);
+        setProgressMap((prev) => {
+          const next = new Map(prev);
+          next.set(article.id, 0);
+          return next;
+        });
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        break;
       case 'share':
         await Share.share({ message: `${article.title}\n${article.link}` });
         break;
@@ -1276,7 +1318,7 @@ export default function FeedScreen() {
             <TouchableOpacity style={[s.filterChip, !activeFilter && s.filterChipActive]} onPress={() => selectFilter(null)}>
               <Text style={[s.filterChipText, !activeFilter && s.filterChipTextActive]}>All</Text>
             </TouchableOpacity>
-            {followedPubs.slice(0, CHIP_ROW_CAP).map((pub) => {
+            {followedPubs.slice(-CHIP_ROW_CAP).map((pub) => {
               const active = activeFilter === pub.id;
               const isMuted = muted.has(pub.id);
               return (
@@ -1356,7 +1398,14 @@ export default function FeedScreen() {
                     const pubName = pub?.name ?? rm?.name ?? 'Source';
                     const prog = progressMap.get(a.id) ?? 0;
                     return (
-                      <TouchableOpacity key={a.id} style={s.continueCard} onPress={() => openArticle(a)} activeOpacity={0.8}>
+                      <TouchableOpacity
+                        key={a.id}
+                        style={s.continueCard}
+                        onPress={() => openArticle(a)}
+                        onLongPress={() => openContinueSheet(a)}
+                        delayLongPress={350}
+                        activeOpacity={0.8}
+                      >
                         <View style={s.continueCardBody}>
                           <View style={s.continuePubRow}>
                             <FaviconIcon feedUrl={a.link} emoji={pub?.emoji ?? '📰'} size={12} />

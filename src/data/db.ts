@@ -218,7 +218,12 @@ export async function initDb(): Promise<void> {
     try { await db.execAsync(`ALTER TABLE daily_log ADD COLUMN book_reading_seconds INTEGER NOT NULL DEFAULT 0`); } catch {}
   }
 
-  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '16')`);
+  // v17: add note support to article highlights, matching what book highlights already have.
+  if (verNum < 17) {
+    try { await db.execAsync(`ALTER TABLE highlights ADD COLUMN note TEXT`); } catch {}
+  }
+
+  await db.runAsync(`INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '17')`);
 }
 
 // --- Settings helpers ---
@@ -815,6 +820,7 @@ export interface HighlightRow {
   article_id: string;
   selected_text: string;
   color: string;
+  note: string | null;
   created_at: number;
 }
 
@@ -822,16 +828,26 @@ export async function saveHighlight(
   articleId: string,
   selectedText: string,
   color: string,
+  note: string | null = null,
 ): Promise<number> {
   const db = getDb();
   const createdAt = Date.now();
   const result = await db.runAsync(
-    `INSERT INTO highlights (article_id, selected_text, color, created_at) VALUES (?, ?, ?, ?)`,
-    [articleId, selectedText, color, createdAt],
+    `INSERT INTO highlights (article_id, selected_text, color, note, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [articleId, selectedText, color, note, createdAt],
   );
   const newId = result.lastInsertRowId;
-  import('../lib/sync').then((m) => m.syncHighlight({ id: newId, article_id: articleId, selected_text: selectedText, color, created_at: createdAt })).catch(() => {});
+  import('../lib/sync').then((m) => m.syncHighlight({ id: newId, article_id: articleId, selected_text: selectedText, color, note, created_at: createdAt })).catch(() => {});
   return newId;
+}
+
+export async function updateHighlight(id: number, color: string, note: string | null): Promise<void> {
+  const db = getDb();
+  await db.runAsync(`UPDATE highlights SET color = ?, note = ? WHERE id = ?`, [color, note, id]);
+  const row = await db.getFirstAsync<HighlightRow>(`SELECT * FROM highlights WHERE id = ?`, [id]);
+  if (row) {
+    import('../lib/sync').then((m) => m.syncHighlight(row)).catch(() => {});
+  }
 }
 
 export async function getHighlightsForArticle(articleId: string): Promise<HighlightRow[]> {
@@ -892,16 +908,17 @@ export async function toggleArticleRead(articleId: string, completed: boolean): 
   const now = Date.now();
   const completedVal = completed ? 1 : 0;
   const depthVal = completed ? 1.0 : 0.0;
-  
+
   await db.runAsync(
     `INSERT INTO reading_progress (article_id, pages_read, total_pages, scroll_depth, completed, last_read_at)
      VALUES (?, ?, 1, ?, ?, ?)
      ON CONFLICT(article_id) DO UPDATE SET
+       pages_read = CASE WHEN excluded.completed = 1 THEN total_pages ELSE 0 END,
        scroll_depth = excluded.scroll_depth,
        completed = excluded.completed,
        last_read_at = excluded.last_read_at`,
-    [articleId, completed ? 1 : 0, depthVal, completedVal, now],
+    [articleId, completedVal, depthVal, completedVal, now],
   );
-  
+
   import('../lib/sync').then((m) => m.syncReadingProgress(articleId)).catch(() => {});
 }

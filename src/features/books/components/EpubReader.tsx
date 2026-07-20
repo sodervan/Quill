@@ -27,6 +27,7 @@ interface Props {
   onScrollChanged?: (depth: number) => void;
   onTextSelected: (text: string, chapter: number) => void;
   onAddNote: (chapter: number) => void;
+  onHighlightTap?: (id: string) => void;
   highlights: BookHighlightRow[];
   rawMode?: boolean;
   readingTheme?: ReadingTheme;
@@ -218,6 +219,16 @@ const SELECTION_JS = `
   document.addEventListener('mouseup', sendSel);
   document.addEventListener('touchend', sendSel);
 
+  // Tap on an existing highlight (not part of ending a text selection) → open its edit sheet
+  document.addEventListener('click', function(e) {
+    if (selActive) return;
+    var el = e.target;
+    while (el && el !== document.body && !(el.hasAttribute && el.hasAttribute('data-hl-id'))) el = el.parentElement;
+    if (el && el.hasAttribute && el.hasAttribute('data-hl-id')) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'highlight_tap', id: el.getAttribute('data-hl-id') }));
+    }
+  });
+
   // Throttled scroll depth reporting (0–1)
   var scrollTimer = null;
   window.addEventListener('scroll', function() {
@@ -308,12 +319,16 @@ function buildRemoveHighlightsJS(ids: string[]): string {
 (function(){
   var ids=${data};
   ids.forEach(function(id){
-    var span=document.querySelector('[data-hl-id="'+id+'"]');
-    if(!span)return;
-    var p=span.parentNode;
-    while(span.firstChild)p.insertBefore(span.firstChild,span);
-    p.removeChild(span);
-    p.normalize();
+    // A highlight spanning a paragraph/list-item break wraps each intersecting text
+    // node in its OWN span sharing this data-hl-id — remove all of them, not just one.
+    var spans=document.querySelectorAll('[data-hl-id="'+id+'"]');
+    spans.forEach(function(span){
+      var p=span.parentNode;
+      if(!p)return;
+      while(span.firstChild)p.insertBefore(span.firstChild,span);
+      p.removeChild(span);
+      p.normalize();
+    });
   });
 })();true;`;
 }
@@ -392,7 +407,7 @@ function buildChapterHtml(
 export default function EpubReader({
   fileUri, bookId, initialChapter, initialScrollOffset = 0, scrollToHighlightId,
   onChapterChanged, onScrollChanged, onTextSelected,
-  onAddNote, highlights, rawMode = false, readingTheme = 'default',
+  onAddNote, onHighlightTap, highlights, rawMode = false, readingTheme = 'default',
 }: Props) {
   const colors = useColors();
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -424,9 +439,13 @@ export default function EpubReader({
   // (e.g. the reader's own highlights list is used to jump to a different highlight).
   const pendingHLPageRef = useRef<number | null>(scrollToHighlightId != null ? (initialChapter || 0) : null);
   const mountHLIdRef = useRef(scrollToHighlightId);
+  // Color actually rendered in the DOM for each applied id — lets the sync effect notice
+  // an in-place color edit (same id, so the add/remove-by-id diff alone won't catch it).
+  const appliedColorRef = useRef<Map<string, string>>(new Map());
 
   function injectHighlights(items: BookHighlightRow[]) {
     if (!webViewRef.current || items.length === 0) return;
+    items.forEach((h) => appliedColorRef.current.set(h.id, h.color));
     webViewRef.current.injectJavaScript(
       buildApplyHighlightsJS(items.map((h) => ({ id: h.id, text: h.selected_text, color: h.color })))
     );
@@ -472,6 +491,7 @@ export default function EpubReader({
     loadedChapterRef.current = current;
 
     appliedHLRef.current = new Set();
+    appliedColorRef.current = new Map();
     const forChapter = highlights.filter((h) => h.page === current && h.selected_text);
     forChapter.forEach((h) => appliedHLRef.current.add(h.id));
     injectHighlights(forChapter);
@@ -506,6 +526,7 @@ export default function EpubReader({
     if (current !== prevCurrentRef.current) {
       prevCurrentRef.current = current;
       appliedHLRef.current = new Set();
+      appliedColorRef.current = new Map();
       return;
     }
     const forChapter = highlights.filter((h) => h.page === current && h.selected_text);
@@ -514,15 +535,24 @@ export default function EpubReader({
     // Remove spans for deleted highlights
     const removedIds = [...appliedHLRef.current].filter((id) => !currentIds.has(id));
     if (removedIds.length > 0) {
-      removedIds.forEach((id) => appliedHLRef.current.delete(id));
+      removedIds.forEach((id) => { appliedHLRef.current.delete(id); appliedColorRef.current.delete(id); });
       webViewRef.current?.injectJavaScript(buildRemoveHighlightsJS(removedIds));
     }
 
-    // Apply newly added highlights
-    const newOnes = forChapter.filter((h) => !appliedHLRef.current.has(h.id));
-    if (newOnes.length === 0) return;
-    newOnes.forEach((h) => appliedHLRef.current.add(h.id));
-    injectHighlights(newOnes);
+    // Highlights whose color changed since they were injected (same id, so the
+    // add/remove diff above never notices) — clear the old span(s) then re-inject.
+    const changedOnes = forChapter.filter(
+      (h) => appliedHLRef.current.has(h.id) && appliedColorRef.current.get(h.id) !== h.color,
+    );
+    if (changedOnes.length > 0) {
+      webViewRef.current?.injectJavaScript(buildRemoveHighlightsJS(changedOnes.map((h) => h.id)));
+    }
+
+    // Apply newly added highlights, plus re-apply changed ones
+    const toInject = forChapter.filter((h) => !appliedHLRef.current.has(h.id) || changedOnes.includes(h));
+    if (toInject.length === 0) return;
+    toInject.forEach((h) => appliedHLRef.current.add(h.id));
+    injectHighlights(toInject);
   }, [highlights, current]);
 
   const goToFn = useRef<(idx: number) => void>(() => {});
@@ -595,6 +625,8 @@ export default function EpubReader({
       } else if (msg.type === 'scroll_depth') {
         liveScrollDepthRef.current = msg.depth as number;
         onScrollChanged?.(msg.depth as number);
+      } else if (msg.type === 'highlight_tap' && msg.id) {
+        onHighlightTap?.(msg.id as string);
       }
     } catch {}
   }

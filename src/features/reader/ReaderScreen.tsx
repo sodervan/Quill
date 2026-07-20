@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Animated, Dimensions, Linking, ScrollView, StatusBar,
-  StyleSheet, Text, TouchableOpacity, TouchableWithoutFeedback, View,
+  ActivityIndicator, Animated, Dimensions, Keyboard, Linking, ScrollView, StatusBar,
+  StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import PagerView from 'react-native-pager-view';
@@ -15,12 +15,11 @@ import { RootStackParamList } from '../../navigation';
 import { type as T, space, radius } from '../../theme';
 import { useColors, useTheme } from '../../theme/ThemeContext';
 import { FaviconAvatar } from '../../components/FaviconAvatar';
-import { AppAlert } from '../../components/AppAlert';
 import { PUBLICATIONS } from '../../data/publications';
 import {
   getArticleById, recordPageRead, recordScrollProgress, updateArticleWordCount,
   logReadEvent, isArticleSaved, saveArticle, unsaveArticle,
-  saveHighlight, getHighlightsForArticle, deleteHighlight, type HighlightRow,
+  saveHighlight, getHighlightsForArticle, deleteHighlight, updateHighlight, type HighlightRow,
   getRemoteMetaSync, getProgress,
 } from '../../data/db';
 import { resolveArticleContent } from '../../data/extractor';
@@ -30,6 +29,7 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Reader'>;
 const { height: SCREEN_H, width: SCREEN_W } = Dimensions.get('window');
 const LOOKUP_H = Math.min(Math.round(SCREEN_H * 0.85), 700);
 const HL_LIST_H = Math.min(560, SCREEN_H * 0.72);
+const HL_SHEET_H = Math.min(520, SCREEN_H * 0.68);
 const READER_FONT = 18;
 const READER_LINE = 30;
 
@@ -82,10 +82,30 @@ export default function ReaderScreen({ route, navigation }: Props) {
   const lookupAnimBg = useRef(new Animated.Value(0)).current;
   const [lookupMounted, setLookupMounted] = useState(false);
 
+  // ── Add/edit highlight sheet (mirrors the book reader's) ──
+  const [sheetState, setSheetState] = useState<
+    | { mode: 'add'; text: string }
+    | { mode: 'edit'; highlight: HighlightRow }
+    | null
+  >(null);
+  const [noteText, setNoteText] = useState('');
+  const [selectedColor, setSelectedColor] = useState(HIGHLIGHT_COLORS[0].color);
+  const sheetAnimY = useRef(new Animated.Value(HL_SHEET_H)).current;
+  const sheetAnimBg = useRef(new Animated.Value(0)).current;
+  const [sheetMounted, setSheetMounted] = useState(false);
+  const [kbHeight, setKbHeight] = useState(0);
+
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', (e) => setKbHeight(e.endCoordinates.height));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKbHeight(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+
   // ── Highlights list sheet ──
   const [listMounted, setListMounted] = useState(false);
   const listAnimY = useRef(new Animated.Value(HL_LIST_H)).current;
   const listAnimBg = useRef(new Animated.Value(0)).current;
+  const [colorFilter, setColorFilter] = useState<string | null>(null);
   // Set when locating a highlight requires switching out of pages mode first — picked
   // up by onWebViewLoadEnd once the WebView (re)mounts in scroll mode.
   const pendingLocateIdRef = useRef<number | null>(null);
@@ -214,30 +234,80 @@ export default function ReaderScreen({ route, navigation }: Props) {
     else { await saveArticle(articleId); setSaved(true); }
   }
 
-  async function handleHighlight(color: string) {
-    const text = selectedText.trim();
-    if (!text) return;
-    setSelectedText('');
-    const newId = await saveHighlight(articleId, text, color);
-    setHighlights((prev) => [...prev, { id: newId, article_id: articleId, selected_text: text, color, created_at: Date.now() }]);
-    // Inject mark directly into live DOM — no WebView reload, no scroll-to-top
-    webViewRef.current?.injectJavaScript(buildInjectMarkJS(text, newId, color));
+  // ── Add/edit highlight sheet ──
+  function openHighlightSheet(state: NonNullable<typeof sheetState>) {
+    if (state.mode === 'edit') {
+      setNoteText(state.highlight.note ?? '');
+      setSelectedColor(state.highlight.color);
+    } else {
+      setNoteText('');
+      setSelectedColor(HIGHLIGHT_COLORS[0].color);
+    }
+    setSheetState(state);
+    sheetAnimY.setValue(HL_SHEET_H);
+    sheetAnimBg.setValue(0);
+    setSheetMounted(true);
+    Animated.parallel([
+      Animated.spring(sheetAnimY, { toValue: 0, tension: 80, friction: 13, useNativeDriver: true }),
+      Animated.timing(sheetAnimBg, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
   }
 
-  function handleDeleteHighlight(id: number) {
-    AppAlert.alert('Remove highlight?', undefined, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove', style: 'destructive',
-        onPress: async () => {
-          await deleteHighlight(id);
-          setHighlights((prev) => prev.filter((h) => h.id !== id));
+  function closeHighlightSheet(cb?: () => void, restoreSelection = false) {
+    Animated.parallel([
+      Animated.timing(sheetAnimY, { toValue: HL_SHEET_H, duration: 260, useNativeDriver: true }),
+      Animated.timing(sheetAnimBg, { toValue: 0, duration: 220, useNativeDriver: true }),
+    ]).start(() => {
+      setSheetMounted(false);
+      setSheetState(null);
+      if (restoreSelection) {
+        // Cancelling out of "add" (not a save) — bring the selection back so the
+        // tooltip reappears and the user can reconsider, same as closing Look up.
+        setTimeout(() => {
           webViewRef.current?.injectJavaScript(
-            `(function(){var ms=document.querySelectorAll('mark[data-highlight-id="${id}"]');for(var i=0;i<ms.length;i++){var m=ms[i];var f=document.createDocumentFragment();while(m.firstChild)f.appendChild(m.firstChild);m.parentNode.replaceChild(f,m);}})();true;`
+            `if(window.__savedRange){try{var s=window.getSelection();s.removeAllRanges();s.addRange(window.__savedRange);}catch(e){}}true;`
           );
-        },
-      },
-    ]);
+        }, 120);
+      }
+      cb?.();
+    });
+  }
+
+  async function saveHighlightFromSheet() {
+    if (!sheetState) return;
+    const note = noteText.trim() || null;
+    if (sheetState.mode === 'add') {
+      const text = sheetState.text.trim();
+      if (!text) { closeHighlightSheet(); return; }
+      const newId = await saveHighlight(articleId, text, selectedColor, note);
+      setHighlights((prev) => [...prev, {
+        id: newId, article_id: articleId, selected_text: text, color: selectedColor, note, created_at: Date.now(),
+      }]);
+      // Inject mark directly into live DOM — no WebView reload, no scroll-to-top
+      webViewRef.current?.injectJavaScript(buildInjectMarkJS(text, newId, selectedColor));
+    } else {
+      const { highlight } = sheetState;
+      await updateHighlight(highlight.id, selectedColor, note);
+      setHighlights((prev) => prev.map((h) => h.id === highlight.id ? { ...h, color: selectedColor, note } : h));
+      // Update every fragment of the live mark — a highlight spanning a paragraph/list-item
+      // break wraps each intersecting text node in its own <mark> sharing this id.
+      webViewRef.current?.injectJavaScript(
+        `(function(){var ms=document.querySelectorAll('mark[data-highlight-id="${highlight.id}"]');for(var i=0;i<ms.length;i++){ms[i].style.background='${selectedColor}55';}})();true;`
+      );
+    }
+    closeHighlightSheet();
+  }
+
+  function deleteCurrentHighlight() {
+    if (!sheetState || sheetState.mode !== 'edit') return;
+    const id = sheetState.highlight.id;
+    closeHighlightSheet(async () => {
+      await deleteHighlight(id);
+      setHighlights((prev) => prev.filter((h) => h.id !== id));
+      webViewRef.current?.injectJavaScript(
+        `(function(){var ms=document.querySelectorAll('mark[data-highlight-id="${id}"]');for(var i=0;i<ms.length;i++){var m=ms[i];var f=document.createDocumentFragment();while(m.firstChild)f.appendChild(m.firstChild);m.parentNode.replaceChild(f,m);}})();true;`
+      );
+    });
   }
 
   function openLookup(text: string) {
@@ -375,7 +445,10 @@ export default function ReaderScreen({ route, navigation }: Props) {
           if (skipNextDeselectRef.current) { skipNextDeselectRef.current = false; }
           else { setSelectedText(''); }
         }
-        else if (msg.type === 'highlight_tap') handleDeleteHighlight(msg.id as number);
+        else if (msg.type === 'highlight_tap') {
+          const h = highlights.find((x) => x.id === msg.id);
+          if (h) openHighlightSheet({ mode: 'edit', highlight: h });
+        }
         return;
       }
     } catch {}
@@ -588,27 +661,35 @@ export default function ReaderScreen({ route, navigation }: Props) {
           </PagerView>
         )}
 
-        {/* ── Highlight toolbar ── rendered as flex sibling so RN touches aren't swallowed by WebView ── */}
-        {scrollMode === 'scroll' && !useWebView && selectedText.length > 0 && (
+        {/* ── Selection tooltip ── rendered as flex sibling so RN touches aren't swallowed by WebView ── */}
+        {scrollMode === 'scroll' && !useWebView && !sheetMounted && selectedText.length > 0 && (
           <View style={s.highlightBar}>
-            <View style={s.highlightTop}>
-              <Text style={s.highlightBarLabel} numberOfLines={1}>
-                "{selectedText.slice(0, 40)}{selectedText.length > 40 ? '…' : ''}"
-              </Text>
+            <Text style={s.highlightBarLabel} numberOfLines={2}>
+              "{selectedText}"
+            </Text>
+            <View style={s.highlightColors}>
+              <TouchableOpacity
+                style={s.highlightCta}
+                onPress={() => {
+                  const text = selectedText;
+                  setSelectedText('');
+                  // Clear the native selection (handles + copy/share/select-all menu) now that
+                  // we're handing off to the sheet — __savedRange already has a clone for the
+                  // mark injection, and __suppressRangeClear stops that clone being nulled out.
+                  webViewRef.current?.injectJavaScript(
+                    `window.__suppressRangeClear=true;var s=window.getSelection();if(s)s.removeAllRanges();true;`
+                  );
+                  openHighlightSheet({ mode: 'add', text });
+                }}
+                activeOpacity={0.85}
+              >
+                <Ionicons name="color-wand-outline" size={15} color={colors.bg} />
+                <Text style={s.highlightCtaText}>Highlight</Text>
+              </TouchableOpacity>
               <TouchableOpacity onPress={() => openLookup(selectedText)} style={s.lookupPill} hitSlop={8}>
-                <Ionicons name="search-outline" size={13} color={colors.accent} />
+                <Ionicons name="search-outline" size={15} color={colors.accent} />
                 <Text style={s.lookupPillText}>Look up</Text>
               </TouchableOpacity>
-            </View>
-            <View style={s.highlightColors}>
-              {HIGHLIGHT_COLORS.map((hc) => (
-                <TouchableOpacity
-                  key={hc.color}
-                  style={[s.highlightDot, { backgroundColor: hc.color }]}
-                  onPress={() => void handleHighlight(hc.color)}
-                  hitSlop={8}
-                />
-              ))}
               <TouchableOpacity
                 onPress={() => {
                   setSelectedText('');
@@ -668,6 +749,78 @@ export default function ReaderScreen({ route, navigation }: Props) {
         </TouchableOpacity>
       )}
 
+      {/* ── Add/edit highlight sheet ── */}
+      {sheetMounted && (
+        <TouchableWithoutFeedback onPress={() => closeHighlightSheet(undefined, sheetState?.mode === 'add')}>
+          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.65)', opacity: sheetAnimBg }]} />
+        </TouchableWithoutFeedback>
+      )}
+      {sheetMounted && (
+        <Animated.View
+          style={[
+            s.hlSheet,
+            { height: HL_SHEET_H, transform: [{ translateY: sheetAnimY }], bottom: kbHeight },
+          ]}
+        >
+          <View style={s.lookupHandle} />
+          <View style={s.hlSheetHeader}>
+            <Text style={s.hlSheetTitle}>
+              {sheetState?.mode === 'edit' ? 'Edit highlight' : 'Add highlight'}
+            </Text>
+            <TouchableOpacity onPress={() => closeHighlightSheet(undefined, sheetState?.mode === 'add')}>
+              <Ionicons name="close" size={22} color={colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={s.hlSheetBody} keyboardShouldPersistTaps="handled">
+            {(sheetState?.mode === 'add' ? sheetState.text : sheetState?.mode === 'edit' ? sheetState.highlight.selected_text : '') ? (
+              <View style={[s.hlQuoteBubble, { borderLeftColor: selectedColor }]}>
+                <Text style={s.hlQuoteText} numberOfLines={4}>
+                  "{sheetState?.mode === 'add' ? sheetState.text : sheetState?.mode === 'edit' ? sheetState.highlight.selected_text : ''}"
+                </Text>
+              </View>
+            ) : null}
+
+            <View style={s.hlColorRow}>
+              {HIGHLIGHT_COLORS.map((hc) => (
+                <TouchableOpacity
+                  key={hc.color}
+                  style={[s.hlColorDot, { backgroundColor: hc.color }, selectedColor === hc.color && s.hlColorDotSelected]}
+                  onPress={() => setSelectedColor(hc.color)}
+                />
+              ))}
+            </View>
+
+            <TextInput
+              style={s.hlNoteInput}
+              placeholder="Add a note (optional)…"
+              placeholderTextColor={colors.textMuted}
+              multiline
+              numberOfLines={4}
+              value={noteText}
+              onChangeText={setNoteText}
+              textAlignVertical="top"
+            />
+          </ScrollView>
+
+          <View style={s.hlSheetActions}>
+            {sheetState?.mode === 'edit' && (
+              <TouchableOpacity style={s.hlDeleteBtn} onPress={deleteCurrentHighlight}>
+                <Ionicons name="trash-outline" size={18} color={colors.danger} />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={[s.hlSaveBtn, { backgroundColor: selectedColor }]}
+              onPress={saveHighlightFromSheet}
+            >
+              <Text style={s.hlSaveBtnText}>
+                {sheetState?.mode === 'edit' ? 'Update' : 'Save highlight'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </Animated.View>
+      )}
+
       {/* ── Lookup / search sheet ── */}
       {lookupMounted && (
         <TouchableWithoutFeedback onPress={closeLookup}>
@@ -718,20 +871,44 @@ export default function ReaderScreen({ route, navigation }: Props) {
               <Text style={s.hlListEmptySub}>Select text while reading to highlight it.</Text>
             </View>
           ) : (
-            <ScrollView contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-              {highlights.map((h) => (
-                <TouchableOpacity
-                  key={h.id}
-                  style={s.hlItem}
-                  onPress={() => locateHighlight(h.id)}
-                  activeOpacity={0.75}
-                >
-                  <View style={[s.hlAccent, { backgroundColor: h.color }]} />
-                  <Text style={s.hlText} numberOfLines={3}>{h.selected_text}</Text>
-                  <Ionicons name="locate-outline" size={18} color={colors.accent} />
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
+            <>
+              {[...new Set(highlights.map((h) => h.color))].length > 1 && (
+                <View style={s.colorFilterRow}>
+                  {[...new Set(highlights.map((h) => h.color))].map((c) => {
+                    const active = colorFilter === c;
+                    return (
+                      <TouchableOpacity
+                        key={c}
+                        onPress={() => setColorFilter(active ? null : c)}
+                        style={[
+                          s.colorFilterDot, { backgroundColor: c },
+                          active && { borderWidth: 2, borderColor: colors.text },
+                        ]}
+                      />
+                    );
+                  })}
+                  {colorFilter && (
+                    <TouchableOpacity onPress={() => setColorFilter(null)} hitSlop={8}>
+                      <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+              <ScrollView contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+                {(colorFilter ? highlights.filter((h) => h.color === colorFilter) : highlights).map((h) => (
+                  <TouchableOpacity
+                    key={h.id}
+                    style={s.hlItem}
+                    onPress={() => locateHighlight(h.id)}
+                    activeOpacity={0.75}
+                  >
+                    <View style={[s.hlAccent, { backgroundColor: h.color }]} />
+                    <Text style={s.hlText} numberOfLines={3}>{h.selected_text}</Text>
+                    <Ionicons name="locate-outline" size={18} color={colors.accent} />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </>
           )}
         </Animated.View>
       )}
@@ -1115,16 +1292,20 @@ function createReaderStyles(colors: ReturnType<typeof useColors>) { return Style
     backgroundColor: colors.surface, borderTopWidth: 1, borderTopColor: colors.border,
     paddingHorizontal: space.md, paddingTop: space.sm, paddingBottom: space.md, gap: 10,
   },
-  highlightTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  highlightBarLabel: { ...T.caption, color: colors.textSecondary, fontStyle: 'italic', flex: 1, marginRight: 8 },
+  highlightBarLabel: { ...T.body, fontSize: 14, color: colors.textSecondary, fontStyle: 'italic', lineHeight: 20 },
   lookupPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: colors.accentMuted, borderRadius: radius.full,
-    paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: colors.accentBorder,
+    paddingHorizontal: 16, paddingVertical: 9, borderWidth: 1, borderColor: colors.accentBorder,
   },
-  lookupPillText: { ...T.caption, color: colors.accent, fontWeight: '700' },
+  lookupPillText: { ...T.body, fontSize: 14, color: colors.accent, fontWeight: '700' },
   highlightColors: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  highlightDot: { width: 28, height: 28, borderRadius: 14 },
+  highlightCta: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: colors.accent, borderRadius: radius.full,
+    paddingHorizontal: 16, paddingVertical: 9,
+  },
+  highlightCtaText: { ...T.body, fontSize: 14, fontWeight: '700', color: colors.bg },
   highlightDismiss: { marginLeft: 'auto' },
   scrollTopBtn: {
     position: 'absolute', bottom: 80, right: space.lg,
@@ -1180,4 +1361,48 @@ function createReaderStyles(colors: ReturnType<typeof useColors>) { return Style
   },
   hlAccent: { width: 4, alignSelf: 'stretch', borderRadius: 2 },
   hlText: { ...T.body, fontSize: 14, lineHeight: 21, color: colors.text, flex: 1 },
+  colorFilterRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: space.lg, paddingBottom: 10,
+  },
+  colorFilterDot: { width: 22, height: 22, borderRadius: 11 },
+  hlSheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl,
+    borderWidth: 1, borderColor: colors.border,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.3, shadowRadius: 12,
+    elevation: 20,
+  },
+  hlSheetHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: space.lg, paddingBottom: space.sm,
+  },
+  hlSheetTitle: { ...T.h2, color: colors.text },
+  hlSheetBody: { paddingHorizontal: space.lg, paddingBottom: space.md, gap: 16 },
+  hlQuoteBubble: {
+    padding: 14, borderRadius: radius.md, backgroundColor: colors.surfaceHigher,
+    borderLeftWidth: 3,
+  },
+  hlQuoteText: { ...T.body, fontStyle: 'italic', fontSize: 15, lineHeight: 23, color: colors.textSecondary },
+  hlColorRow: { flexDirection: 'row', gap: 14, paddingVertical: 4 },
+  hlColorDot: { width: 28, height: 28, borderRadius: 14 },
+  hlColorDotSelected: { borderWidth: 3, borderColor: colors.text, transform: [{ scale: 1.15 }] },
+  hlNoteInput: {
+    borderWidth: 1, borderRadius: radius.md, borderColor: colors.border,
+    backgroundColor: colors.surfaceHigher, color: colors.text,
+    padding: 12, minHeight: 90, ...T.body, fontSize: 14,
+  },
+  hlSheetActions: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: space.lg, paddingVertical: space.md,
+    borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  hlDeleteBtn: {
+    width: 46, height: 46, borderRadius: radius.md,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: colors.border,
+  },
+  hlSaveBtn: { flex: 1, height: 46, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
+  hlSaveBtnText: { ...T.body, fontWeight: '700', color: '#090C15' },
 }); }

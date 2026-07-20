@@ -235,6 +235,7 @@ export default function BookReaderScreen({ route, navigation }: Props) {
   const listAnimY = useRef(new Animated.Value(LIST_SHEET_H)).current;
   const listAnimBg = useRef(new Animated.Value(0)).current;
   const [listMounted, setListMounted] = useState(false);
+  const [colorFilter, setColorFilter] = useState<string | null>(null);
 
   // ── Keyboard height tracking (lifts the note sheet above the keyboard) ──
   const [kbHeight, setKbHeight] = useState(0);
@@ -412,6 +413,9 @@ export default function BookReaderScreen({ route, navigation }: Props) {
     return <View style={[s.root, { justifyContent: 'center', alignItems: 'center' }]} />;
   }
 
+  const usedHighlightColors = [...new Set(highlights.map((h) => h.color))];
+  const visibleHighlights = colorFilter ? highlights.filter((h) => h.color === colorFilter) : highlights;
+
   return (
     <View style={s.root}>
       <StatusBar barStyle="light-content" backgroundColor={colors.bgDeep} />
@@ -500,6 +504,10 @@ export default function BookReaderScreen({ route, navigation }: Props) {
           onScrollChanged={handleScrollChanged}
           onTextSelected={handleTextSelected}
           onAddNote={handleAddNote}
+          onHighlightTap={(id) => {
+            const h = highlights.find((x) => x.id === id);
+            if (h) openSheet({ mode: 'edit', highlight: h });
+          }}
           highlights={highlights}
           rawMode={rawMode}
           readingTheme={readingTheme}
@@ -685,8 +693,31 @@ export default function BookReaderScreen({ route, navigation }: Props) {
               </Text>
             </View>
           ) : (
-            <ScrollView contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
-              {highlights.map((h) => (
+            <>
+              {usedHighlightColors.length > 1 && (
+                <View style={s.colorFilterRow}>
+                  {usedHighlightColors.map((c) => {
+                    const active = colorFilter === c;
+                    return (
+                      <TouchableOpacity
+                        key={c}
+                        onPress={() => setColorFilter(active ? null : c)}
+                        style={[
+                          s.colorFilterDot, { backgroundColor: c },
+                          active && { borderWidth: 2, borderColor: colors.text },
+                        ]}
+                      />
+                    );
+                  })}
+                  {colorFilter && (
+                    <TouchableOpacity onPress={() => setColorFilter(null)} hitSlop={8}>
+                      <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+              <ScrollView contentContainerStyle={{ paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+              {visibleHighlights.map((h) => (
                 <TouchableOpacity
                   key={h.id}
                   style={[s.hlItem, { borderBottomColor: colors.border }]}
@@ -713,7 +744,7 @@ export default function BookReaderScreen({ route, navigation }: Props) {
                   </View>
                   {book.format !== 'txt' && (
                     <TouchableOpacity
-                      style={s.hlLocateBtn}
+                      style={[s.hlLocateBtn, { backgroundColor: colors.accentMuted }]}
                       onPress={() => {
                         closeList(() => {
                           if (book.format === 'pdf') setJumpToPdfPage(h.page);
@@ -725,10 +756,10 @@ export default function BookReaderScreen({ route, navigation }: Props) {
                       <Ionicons name="locate-outline" size={18} color={colors.accent} />
                     </TouchableOpacity>
                   )}
-                  <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
                 </TouchableOpacity>
               ))}
-            </ScrollView>
+              </ScrollView>
+            </>
           )}
         </Animated.View>
       )}
@@ -830,7 +861,15 @@ function createStyles(colors: ReturnType<typeof useColors>) {
     },
     hlAccent: { width: 4, alignSelf: 'stretch', borderRadius: 2, marginTop: 2 },
     hlBody: { flex: 1 },
-    hlLocateBtn: { padding: 4, marginRight: 2 },
+    hlLocateBtn: {
+      width: 34, height: 34, borderRadius: 17,
+      alignItems: 'center', justifyContent: 'center',
+    },
+    colorFilterRow: {
+      flexDirection: 'row', alignItems: 'center', gap: 10,
+      paddingHorizontal: space.lg, paddingBottom: 10,
+    },
+    colorFilterDot: { width: 22, height: 22, borderRadius: 11 },
     hlPage: { ...T.caption, fontWeight: '600', marginBottom: 4 },
     hlText: { ...T.body, fontSize: 14, lineHeight: 21, marginBottom: 4 },
     hlNote: { ...T.caption, fontStyle: 'italic' },

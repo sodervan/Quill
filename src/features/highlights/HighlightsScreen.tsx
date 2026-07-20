@@ -167,6 +167,7 @@ export default function HighlightsScreen() {
   // Filter state
   const [activePubId, setActivePubId] = useState<string | null>(null);
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
+  const [colorFilter, setColorFilter] = useState<string | null>(null);
 
   // Searchable filter list — same "find one by typing" fallback as the Feed page,
   // context-aware: sources on the Articles tab, books on the Books tab.
@@ -378,27 +379,32 @@ export default function HighlightsScreen() {
     ? uniqueBooks.filter((b) => b.title.toLowerCase().includes(pubSearchQuery.trim().toLowerCase()))
     : uniqueBooks;
 
+  const usedArticleColors = useMemo(() => [...new Set(articleItems.map((h) => h.color))], [articleItems]);
+  const usedBookColors = useMemo(() => [...new Set(bookItems.map((h) => h.color))], [bookItems]);
+
   // Filtered + searched article highlights
   const filteredArticles = useMemo(() => {
     let list = articleItems;
     if (activePubId) list = list.filter((h) => h.publication_id === activePubId);
+    if (colorFilter) list = list.filter((h) => h.color === colorFilter);
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
       list = list.filter((h) => h.selected_text.toLowerCase().includes(q));
     }
     return list;
-  }, [articleItems, activePubId, searchQuery]);
+  }, [articleItems, activePubId, colorFilter, searchQuery]);
 
   // Filtered + searched book highlights
   const filteredBooks = useMemo(() => {
     let list = bookItems;
     if (activeBookId) list = list.filter((h) => h.book_id === activeBookId);
+    if (colorFilter) list = list.filter((h) => h.color === colorFilter);
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
       list = list.filter((h) => h.selected_text.toLowerCase().includes(q));
     }
     return list;
-  }, [bookItems, activeBookId, searchQuery]);
+  }, [bookItems, activeBookId, colorFilter, searchQuery]);
 
   const total = tab === 'articles' ? filteredArticles.length : filteredBooks.length;
 
@@ -582,6 +588,30 @@ export default function HighlightsScreen() {
               );
             })}
           </ScrollView>
+        )}
+
+        {/* ── Color filter row ── */}
+        {(tab === 'articles' ? usedArticleColors : usedBookColors).length > 1 && (
+          <View style={s.colorFilterRow}>
+            {(tab === 'articles' ? usedArticleColors : usedBookColors).map((c) => {
+              const active = colorFilter === c;
+              return (
+                <TouchableOpacity
+                  key={c}
+                  onPress={() => setColorFilter(active ? null : c)}
+                  style={[
+                    s.colorFilterDot, { backgroundColor: c },
+                    active && { borderWidth: 2, borderColor: colors.text },
+                  ]}
+                />
+              );
+            })}
+            {colorFilter && (
+              <TouchableOpacity onPress={() => setColorFilter(null)} hitSlop={8}>
+                <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            )}
+          </View>
         )}
 
         {/* ── Article highlights list ── */}
@@ -1023,6 +1053,11 @@ function createStyles(colors: ReturnType<typeof useColors>) { return StyleSheet.
   },
   filterChipAllActive: { backgroundColor: colors.accentMuted, borderColor: colors.accentBorder },
   filterChipText: { fontSize: 13, fontWeight: '600' as const, color: colors.textSecondary, letterSpacing: 0 },
+  colorFilterRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: space.md, paddingBottom: 10,
+  },
+  colorFilterDot: { width: 22, height: 22, borderRadius: 11 },
 
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: space.md, paddingHorizontal: space.xl },
   emptyTitle: { ...T.h2, color: colors.text },
