@@ -1092,12 +1092,17 @@ function applyHighlightsToHtml(html: string, highlights: HighlightRow[]): string
     if (!h.selected_text.trim()) continue;
     const style = `background:${h.color}55;border-radius:3px;padding:0 2px;cursor:pointer`;
     // A highlight that spans a paragraph/list-item break has one or more newlines in
-    // selected_text (that's how Selection.toString() joins text across block elements).
+    // selected_text (that's how Selection.toString() joined text across block elements).
     // The raw HTML has real </p><p>/</li><li> tags in between, not a bare newline, so a
     // single regex over the whole string never matches and the highlight silently fails
     // to re-apply on reload — wrap each block's chunk separately instead, same as the
     // live in-DOM highlighting already does per text node.
     const chunks = h.selected_text.split(/\r?\n+/).map((c) => c.trim()).filter(Boolean);
+    // Once a prior chunk has matched, only look for the next one after it — otherwise a
+    // repeated name/phrase elsewhere in the article (e.g. an attribution mentioned twice)
+    // could match every occurrence (with the 'g' flag) or the wrong one entirely, instead
+    // of the one actually adjacent to the rest of this highlight.
+    let searchFrom = 0;
     for (const chunk of chunks) {
       // Selection.toString() only captures plain text, so if this chunk's span in the
       // raw HTML has any inline markup inside it (a link, <em>, <strong>, ...) — common
@@ -1110,10 +1115,13 @@ function applyHighlightsToHtml(html: string, highlights: HighlightRow[]): string
       if (words.length === 0) continue;
       const pattern = words.join('(?:\\s|<[^>]+>)+');
       try {
-        result = result.replace(
-          new RegExp(pattern, 'g'),
-          (match) => `<mark data-highlight-id="${h.id}" style="${style}">${match}</mark>`,
-        );
+        const match = new RegExp(pattern).exec(result.slice(searchFrom));
+        if (!match) continue;
+        const start = searchFrom + match.index;
+        const end = start + match[0].length;
+        const wrapped = `<mark data-highlight-id="${h.id}" style="${style}">${match[0]}</mark>`;
+        result = result.slice(0, start) + wrapped + result.slice(end);
+        searchFrom = start + wrapped.length;
       } catch {}
     }
   }

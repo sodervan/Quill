@@ -253,11 +253,16 @@ function buildApplyHighlightsJS(items: Array<{ id: string; text: string; color: 
   // the whole body mapping each character back to its (node, offset), search each
   // newline-delimited chunk in that flat text, then reconstruct a real Range from the
   // match and wrap it per intersecting text node — same approach used for articles.
-  function buildTextIndex(){
+  function buildTextIndex(afterEl){
     var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
     var node,text='',map=[];
     while((node=walker.nextNode())){
       if(node.parentNode&&node.parentNode.hasAttribute&&node.parentNode.hasAttribute('data-hl-id'))continue;
+      // Once a prior chunk of this same highlight has matched somewhere, only consider
+      // text that comes AFTER it — otherwise a repeated name/phrase elsewhere in the
+      // book (e.g. an attribution like "James Clear" that also appears earlier in the
+      // chapter) wins the independent indexOf search instead of the adjacent occurrence.
+      if(afterEl&&!(afterEl.compareDocumentPosition(node)&Node.DOCUMENT_POSITION_FOLLOWING))continue;
       var v=node.nodeValue||'';
       for(var i=0;i<v.length;i++)map.push({node:node,offset:i});
       text+=v;
@@ -290,6 +295,7 @@ function buildApplyHighlightsJS(items: Array<{ id: string; text: string; color: 
         if(en>st)entries.push({node:n,start:st,end:en});
       }
     }
+    var spans=[];
     entries.forEach(function(e){
       var sub=document.createRange();
       sub.setStart(e.node,e.start);
@@ -297,15 +303,20 @@ function buildApplyHighlightsJS(items: Array<{ id: string; text: string; color: 
       var span=document.createElement('span');
       span.setAttribute('data-hl-id',id);
       span.style.cssText='background:'+color+'55;border-radius:2px;padding:0 1px;';
-      try{sub.surroundContents(span);}catch(err){}
+      try{sub.surroundContents(span);spans.push(span);}catch(err){}
     });
+    return spans;
   }
   function applyHL(id,txt,color){
     var chunks=txt.split(/\\r?\\n+/).map(function(c){return c.trim();}).filter(Boolean);
+    var afterEl=null;
     chunks.forEach(function(chunk){
-      var index=buildTextIndex();
+      var index=buildTextIndex(afterEl);
       var range=findChunkRange(index,chunk);
-      if(range)wrapRange(range,id,color);
+      if(range){
+        var spans=wrapRange(range,id,color);
+        if(spans.length)afterEl=spans[spans.length-1];
+      }
     });
   }
   var hs=${data};
