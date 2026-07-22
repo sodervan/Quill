@@ -903,7 +903,12 @@ export default function ReaderScreen({ route, navigation }: Props) {
                     activeOpacity={0.75}
                   >
                     <View style={[s.hlAccent, { backgroundColor: h.color }]} />
-                    <Text style={s.hlText} numberOfLines={3}>{h.selected_text}</Text>
+                    <View style={s.hlBody}>
+                      <Text style={s.hlText} numberOfLines={3}>{h.selected_text}</Text>
+                      {h.note ? (
+                        <Text style={s.hlNote} numberOfLines={2}>{h.note}</Text>
+                      ) : null}
+                    </View>
                     <Ionicons name="locate-outline" size={18} color={colors.accent} />
                   </TouchableOpacity>
                 ))}
@@ -1368,7 +1373,9 @@ function createReaderStyles(colors: ReturnType<typeof useColors>) { return Style
     borderBottomWidth: 1, borderBottomColor: colors.border,
   },
   hlAccent: { width: 4, alignSelf: 'stretch', borderRadius: 2 },
-  hlText: { ...T.body, fontSize: 14, lineHeight: 21, color: colors.text, flex: 1 },
+  hlBody: { flex: 1 },
+  hlText: { ...T.body, fontSize: 14, lineHeight: 21, color: colors.text },
+  hlNote: { ...T.caption, color: colors.accent, fontStyle: 'italic', marginTop: 4 },
   colorFilterRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: space.lg, paddingBottom: 10,

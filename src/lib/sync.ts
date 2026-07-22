@@ -107,6 +107,10 @@ export async function syncReadingProgress(articleId: string): Promise<void> {
     const dbMod = await import('../data/db');
     const row = await dbMod.getProgress(articleId);
     if (!row) return;
+    // Carry a lightweight article snapshot alongside progress so a device restoring this
+    // later can recreate a placeholder if the RSS item itself has aged out of the feed —
+    // otherwise the restored entry points at nothing and can never be opened.
+    const article = await dbMod.getArticleById(articleId);
     await setDoc(doc(db, 'users', userId, 'reading_progress', safeId(articleId)), {
       article_id: articleId,
       pages_read: row.pages_read,
@@ -114,7 +118,18 @@ export async function syncReadingProgress(articleId: string): Promise<void> {
       scroll_depth: row.scroll_depth,
       completed: row.completed === 1,
       last_read_at: row.last_read_at,
-    });
+      article_title: article?.title ?? null,
+      article_link: article?.link ?? null,
+      publication_id: article?.publication_id ?? null,
+    }, { merge: true });
+  } catch {}
+}
+
+export async function syncDeleteReadingProgress(articleId: string): Promise<void> {
+  const userId = uid();
+  if (!userId) return;
+  try {
+    await deleteDoc(doc(db, 'users', userId, 'reading_progress', safeId(articleId)));
   } catch {}
 }
 
@@ -325,15 +340,21 @@ export async function uploadLocalToSupabase(): Promise<void> {
 
   try {
     const rawDb = dbMod.getDb();
+    // Left-joined so a device that restores this later can recreate a placeholder
+    // articles row even if the original RSS item has long since aged out of the feed —
+    // otherwise the restored progress entry points at nothing and can never be opened.
     const progress = await rawDb.getAllAsync<{
       article_id: string; pages_read: number; total_pages: number;
       scroll_depth: number; completed: number; last_read_at: number;
-    }>(`SELECT * FROM reading_progress`);
+      title: string | null; link: string | null; publication_id: string | null;
+    }>(`SELECT rp.*, a.title, a.link, a.publication_id FROM reading_progress rp
+        LEFT JOIN articles a ON rp.article_id = a.id`);
     const b4 = writeBatch(db);
     for (const p of progress) {
       b4.set(doc(db, 'users', userId, 'reading_progress', safeId(p.article_id)), {
         article_id: p.article_id, pages_read: p.pages_read, total_pages: p.total_pages,
         scroll_depth: p.scroll_depth ?? 0, completed: p.completed === 1, last_read_at: p.last_read_at,
+        article_title: p.title ?? null, article_link: p.link ?? null, publication_id: p.publication_id ?? null,
       });
     }
     await b4.commit();
@@ -602,6 +623,16 @@ export async function restoreFromSupabase(): Promise<void> {
            last_read_at = MAX(last_read_at, excluded.last_read_at)`,
         [p.article_id, p.pages_read, p.total_pages, p.scroll_depth ?? 0, p.completed ? 1 : 0, p.last_read_at],
       );
+      // The RSS item behind this progress entry may have aged out of the feed on this
+      // device and never gotten cached — without a placeholder it'd show up in History
+      // as an untappable "Article" entry with no way to ever open it.
+      if (p.article_title && p.article_link) {
+        await rawDb.runAsync(
+          `INSERT OR IGNORE INTO articles (id, publication_id, title, link, pub_date, fetched_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [p.article_id, p.publication_id ?? '', p.article_title, p.article_link, p.last_read_at, Date.now()],
+        );
+      }
     }
   } catch {}
 }

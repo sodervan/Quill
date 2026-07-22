@@ -379,6 +379,12 @@ export async function getProgress(articleId: string): Promise<ProgressRow | null
   return db.getFirstAsync<ProgressRow>(`SELECT * FROM reading_progress WHERE article_id = ?`, [articleId]);
 }
 
+export async function removeReadingProgress(articleId: string): Promise<void> {
+  const db = getDb();
+  await db.runAsync(`DELETE FROM reading_progress WHERE article_id = ?`, [articleId]);
+  import('../lib/sync').then((m) => m.syncDeleteReadingProgress(articleId)).catch(() => {});
+}
+
 export async function getProgressBatch(articleIds: string[]): Promise<Map<string, number>> {
   if (articleIds.length === 0) return new Map();
   const db = getDb();

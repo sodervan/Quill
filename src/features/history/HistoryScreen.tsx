@@ -16,7 +16,7 @@ import { getAllBooks, type BookRow } from '../../data/books';
 import {
   getReadHistory, type ReadHistoryRow,
   getAllRemoteSources, getRemoteMetaSync,
-  isArticleSaved, saveArticle, unsaveArticle,
+  isArticleSaved, saveArticle, unsaveArticle, removeReadingProgress,
 } from '../../data/db';
 import { PUBLICATIONS } from '../../data/publications';
 import { type as T, space, radius } from '../../theme';
@@ -151,6 +151,9 @@ export default function HistoryScreen() {
       await Share.share({ message: link ? `${title}\n${link}` : title });
     } else if (action === 'browser' && art.link) {
       await Linking.openURL(art.link);
+    } else if (action === 'remove') {
+      await removeReadingProgress(art.article_id);
+      setArticleHistory((prev) => prev.filter((a) => a.article_id !== art.article_id));
     }
   }
 
@@ -446,6 +449,12 @@ export default function HistoryScreen() {
                     <Text style={s.sheetRowLabel}>Open in browser</Text>
                   </TouchableOpacity>
                 ) : null}
+                <View style={s.sheetDivider} />
+
+                <TouchableOpacity style={s.sheetRow} onPress={() => void handleSheetAction('remove')}>
+                  <Ionicons name="trash-outline" size={22} color={colors.danger} />
+                  <Text style={[s.sheetRowLabel, { color: colors.danger }]}>Remove from history</Text>
+                </TouchableOpacity>
               </>
             )}
           </Animated.View>
